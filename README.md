@@ -288,6 +288,175 @@ X media v2 needs binary multipart, not a URL. The bot fetches the image with `Ac
 
 ---
 
+## Extending the bot
+
+The bot is structured so adding new data sources or new event types is a "drop in another provider" exercise, not a rewrite. Providers produce `CanonicalSaleEvent`s; the formatter, dedupe table, and X client are all marketplace- and event-source-agnostic.
+
+### Adding Blur sales via Alchemy NFT API
+
+**First, the honest baseline:** OpenSea v2 events already includes Blur fills — they appear with `marketplace: "blur"` and the bot posts them out of the box. The reasons to add Alchemy alongside it are:
+
+1. **Latency.** Alchemy reads the chain directly, so Blur sales typically appear ~3–10 s sooner than via OpenSea's aggregator pipeline.
+2. **Reliability.** When OpenSea's indexer hiccups (it does), Alchemy keeps flowing.
+3. **Dedupe is free.** The unique constraint is `(chain_id, tx_hash, log_index, contract, token_id)`. If Alchemy and OpenSea both report the same fill, only one wins the `INSERT` and only one posts. Running both providers is **additive coverage with zero risk of double-posting**.
+
+**Steps:**
+
+1. Get an Alchemy key at <https://alchemy.com>, create an app on Ethereum mainnet, copy the API key.
+
+2. Add it to `.env`:
+
+   ```dotenv
+   ALCHEMY_API_KEY=your_alchemy_key_here
+   ALCHEMY_NETWORK=eth-mainnet
+   ```
+
+3. Create `src/providers/alchemy.ts`, modeled on the OpenSea provider. The relevant endpoint is [`getNFTSales`](https://docs.alchemy.com/reference/getnftsales-v3):
+
+   ```
+   GET https://{network}.g.alchemy.com/nft/v3/{apiKey}/getNFTSales
+       ?marketplace=blur
+       &contractAddress={contract}
+       &fromBlock={lastSeen}
+       &order=asc
+   ```
+
+   Sketch:
+
+   ```ts
+   import type { CanonicalSaleEvent, TrackedCollection } from "../types.js";
+
+   export class AlchemyBlurProvider {
+     private lastBlockBySlug = new Map<string, bigint>();
+
+     public constructor(
+       private readonly cfg: { apiKey: string; network: string },
+     ) {}
+
+     public async fetchLatestSales(
+       collections: TrackedCollection[],
+     ): Promise<CanonicalSaleEvent[]> {
+       const out: CanonicalSaleEvent[] = [];
+       for (const col of collections) {
+         const fromBlock = (this.lastBlockBySlug.get(col.slug) ?? 0n).toString();
+         const url = new URL(
+           `https://${this.cfg.network}.g.alchemy.com/nft/v3/${this.cfg.apiKey}/getNFTSales`,
+         );
+         url.searchParams.set("marketplace", "blur");
+         url.searchParams.set("contractAddress", col.contract);
+         url.searchParams.set("fromBlock", fromBlock);
+         url.searchParams.set("order", "asc");
+
+         const res = await fetch(url, { headers: { accept: "application/json" } });
+         if (!res.ok) continue;
+         const json = (await res.json()) as { nftSales: any[] };
+
+         for (const sale of json.nftSales) {
+           out.push({
+             chainId: col.chainId,
+             contract: col.contract,
+             collectionSlug: col.slug,
+             tokenId: sale.tokenId,
+             txHash: sale.transactionHash,
+             logIndex: Number(sale.logIndex),
+             blockNumber: BigInt(sale.blockNumber),
+             timestamp: new Date(sale.blockTimestamp),
+             marketplace: "blur",
+             buyer: sale.buyerAddress,
+             seller: sale.sellerAddress,
+             priceEth: Number(sale.sellerFee?.amount ?? 0) / 1e18,
+             priceUsd: null,
+             assetUrl: `https://blur.io/asset/${col.contract}/${sale.tokenId}`,
+             imageUrl: null, // see image fallback note below
+             txUrl: `https://etherscan.io/tx/${sale.transactionHash}`,
+             floorChangePct: null,
+             eventId: `${sale.transactionHash}:${sale.logIndex}`,
+             payload: sale,
+           });
+           const blockN = BigInt(sale.blockNumber);
+           if (blockN > (this.lastBlockBySlug.get(col.slug) ?? 0n)) {
+             this.lastBlockBySlug.set(col.slug, blockN);
+           }
+         }
+       }
+       return out;
+     }
+   }
+   ```
+
+4. Wire it into `src/index.ts` alongside the OpenSea provider. Each cycle, fetch from both, merge, sort chronologically, then run the existing dedupe + post pipeline:
+
+   ```ts
+   const sales = [
+     ...(await openSeaProvider.fetchLatestSales(collections)),
+     ...(await alchemyProvider.fetchLatestSales(collections)),
+   ].sort(
+     (a, b) => (a.timestamp?.getTime() ?? 0) - (b.timestamp?.getTime() ?? 0),
+   );
+   ```
+
+5. **Image fallback.** Alchemy's `getNFTSales` doesn't return image URLs. Three options, in order of effort:
+
+   - One extra request per sale to Alchemy's [`getNFTMetadata`](https://docs.alchemy.com/reference/getnftmetadata-v3) and read `image.cachedUrl`.
+   - Hit OpenSea's NFT endpoint (`/api/v2/chain/{chain}/contract/{contract}/nfts/{tokenId}`) for the same token.
+   - Maintain an in-memory `(contract, tokenId) → imageUrl` cache populated by any prior OpenSea sale of that token; fall through to one of the above on miss.
+
+   The X client already posts text-only when `imageUrl` is null, so this isn't a blocker — it's a polish step.
+
+> 💡 **Want push instead of poll?** Alchemy [Notify](https://docs.alchemy.com/reference/notify-api-quickstart) supports webhooks for NFT activity. Add an HTTP endpoint to the bot, register a `NFT_ACTIVITY` webhook against your contracts, and feed received events through the same canonical pipeline. Lower latency, no polling overhead, slightly more infra.
+
+### Tracking other event types
+
+The current `CanonicalSaleEvent` is sale-only. To support other event kinds, generalize it with a discriminator:
+
+```ts
+export type CanonicalNftEvent =
+  | ({ kind: "sale" } & CanonicalSaleEvent)
+  | { kind: "mint"; ...baseFields, minter: `0x${string}` }
+  | { kind: "listing"; ...baseFields, listPriceEth: number; expiresAt: Date }
+  | { kind: "transfer"; ...baseFields, from: `0x${string}`; to: `0x${string}` }
+  | { kind: "bid"; ...baseFields, bidder: `0x${string}`; bidPriceEth: number };
+```
+
+Then `renderSaleAlert` becomes a `switch (event.kind)` returning a different template per kind (keep the existing one for `"sale"`).
+
+**Best source per event type:**
+
+| Event              | Best source                                                                       | Notes                                                                                       |
+| ------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **Sales**          | OpenSea events `event_type=sale` (already wired)                                  | Aggregates all marketplaces, including Blur                                                 |
+| **Mints**          | Alchemy [`getAssetTransfers`](https://docs.alchemy.com/reference/alchemy-getassettransfers) with `category=erc721`, `fromAddress=0x0…` | Or OpenSea events `event_type=transfer` filtered for null-address sender |
+| **Listings**       | OpenSea events `event_type=listing`, or [Reservoir](https://docs.reservoir.tools/reference/getordersasksv5) `/orders/asks/v5`            | Reservoir is faster; OpenSea is broader. Pick one to avoid double-counting.                |
+| **Bids / offers**  | OpenSea events `event_type=offer`, or Blur's collection bid pool                  | Blur's bid pool is by far the most active bid surface for blue-chips                        |
+| **OTC transfers**  | Alchemy `getAssetTransfers` with no `value`, joined against sale tx hashes        | Filters out sale-attached transfers; what's left is OTC and wallet shuffles                 |
+| **Cancellations**  | OpenSea events `event_type=cancel`                                                | Niche, but useful for tracking listing churn                                                |
+| **Sweeps**         | Derived — group sales by `(buyer, blockNumber)` in `index.ts` before posting      | Render as a single "swept N for X ETH" post instead of N individual posts                  |
+
+**Architectural pattern for adding a kind:**
+
+1. Extend `CanonicalNftEvent` with the new variant in `src/types.ts`.
+2. Add a fetcher in `src/providers/` that produces that variant.
+3. Add a `case` arm in `src/format/alert.ts` for the new `kind`.
+4. The DB and X client need **no changes** — they're already kind-agnostic. The unique constraint already covers any event keyed by `(tx_hash, log_index, contract, token_id)`. For listings/bids that don't have a tx hash, swap in `(order_hash, contract, token_id)` by adding a second migration with a separate dedupe table.
+
+**Per-kind toggles in collection config:**
+
+To let operators opt in per collection, add booleans to `TrackedCollection`:
+
+```json
+{
+  "slug": "pixel-pups",
+  "trackSales": true,
+  "trackMints": true,
+  "trackListings": false,
+  "trackBids": false
+}
+```
+
+Then in the main loop only call the providers whose flag is on. This keeps a noisy collection (lots of listings, cancels, churned bids) from spamming an X account that only wants sales.
+
+---
+
 ## Environment variables
 
 See [`.env.example`](.env.example) for the full list. The required ones:
