@@ -1,0 +1,24 @@
+[
+  {
+    "slug": "pixel-pups",
+    "openseaSlug": "pixel-pups",
+    "contract": "0x1c75df005dd674630b212ce8106fcab29b1ac1bf",
+    "chainId": 1,
+    "displayName": "Pixel Pup",
+    "emoji": "🐾",
+    "communityCallToAction": "The pack is growing",
+    "communityUrl": "https://opensea.io/collection/pixel-pups",
+    "minPriceEth": null
+  },
+  {
+    "slug": "bayc",
+    "openseaSlug": "boredapeyachtclub",
+    "contract": "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d",
+    "chainId": 1,
+    "displayName": "BAYC",
+    "emoji": "🐒",
+    "communityCallToAction": "The yacht club grows",
+    "communityUrl": "https://opensea.io/collection/boredapeyachtclub",
+    "minPriceEth": 10
+  }
+]

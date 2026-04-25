@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: bot
+      POSTGRES_DB: bot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgres://bot:bot@db:5432/bot
+      OPENSEA_API_KEY: ${OPENSEA_API_KEY}
+      X_API_KEY: ${X_API_KEY}
+      X_API_SECRET: ${X_API_SECRET}
+      X_ACCESS_TOKEN: ${X_ACCESS_TOKEN}
+      X_ACCESS_TOKEN_SECRET: ${X_ACCESS_TOKEN_SECRET}
+      COLLECTIONS_PATH: /app/collections.json
+      ALERT_POLL_MS: ${ALERT_POLL_MS:-4000}
+      OPENSEA_POLL_LOOKBACK_SEC: ${OPENSEA_POLL_LOOKBACK_SEC:-900}
+    volumes:
+      - ./collections.json:/app/collections.json:ro
+
+volumes:
+  pgdata:

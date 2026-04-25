@@ -1,0 +1,39 @@
+{
+  "name": "nft-sales-bot",
+  "version": "1.0.0",
+  "description": "Production-grade NFT sales tracker bot for X (Twitter). Posts every sale of your collection live, with image, marketplace, buyer/seller, and 24h floor change.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/src/index.js",
+    "dev": "tsc -p tsconfig.json && node dist/src/index.js",
+    "migrate": "node dist/src/db/migrate-cli.js"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.20",
+    "@types/pg": "^8.15.5",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "nft",
+    "opensea",
+    "twitter",
+    "x-api",
+    "sales-bot",
+    "ethereum",
+    "buy-bot",
+    "sales-tracker"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/simplefarmer69/2026-NFT-Sales-Bot"
+  }
+}
