@@ -24,6 +24,12 @@ export type TrackedCollection = {
   communityUrl: string;
   /** Optional floor for posting. Sales below this ETH value are silently skipped. */
   minPriceEth: number | null;
+  /**
+   * Optional hashtags appended as the final line of the post, e.g.
+   * ["#PupCup", "#WorldPupProtocol"]. A leading "#" is added if missing.
+   * Empty/absent = no hashtag line.
+   */
+  hashtags?: string[];
 };
 
 /**

@@ -11,6 +11,18 @@
     "minPriceEth": null
   },
   {
+    "slug": "pup-cup",
+    "openseaSlug": "the-pup-cup-429884582",
+    "contract": "0x48bc32c1fd1f3c4f5d1be11c0b586b63b44da751",
+    "chainId": 1,
+    "displayName": "Pup Cup",
+    "emoji": "🏆",
+    "communityCallToAction": "Join the World Pup Protocol",
+    "communityUrl": "https://opensea.io/collection/the-pup-cup-429884582",
+    "minPriceEth": null,
+    "hashtags": ["#PupCup", "#WorldPupProtocol"]
+  },
+  {
     "slug": "bayc",
     "openseaSlug": "boredapeyachtclub",
     "contract": "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d",

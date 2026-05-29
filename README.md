@@ -122,6 +122,7 @@ Each entry looks like this:
 | `communityCallToAction`  | yes      | Phrase before the community URL. e.g. `The pack is growing`.                     |
 | `communityUrl`           | yes      | URL printed after the call-to-action. Usually your OpenSea collection page.      |
 | `minPriceEth`            | no       | Skip sales below this ETH value. Set to `null` to post all sales.                |
+| `hashtags`               | no       | Array of hashtags appended as the final line, e.g. `["#PupCup", "#WorldPupProtocol"]`. A leading `#` is added if missing. Omit or use `[]` for none. |
 
 ### 4. Set environment variables
 

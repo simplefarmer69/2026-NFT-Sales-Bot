@@ -31,6 +31,7 @@ function formatEth(value: number | null): string {
  *   {assetUrl}
  *   {communityCallToAction}: {communityUrl}
  *   📈 Floor +{X.X}%        (only if positive AND >=24h baseline AND enabled)
+ *   {#hashtags}             (only if the collection defines any)
  *
  * The 280-character truncation in the X client is the final guardrail.
  */
@@ -56,6 +57,10 @@ export function renderSaleAlert(input: {
     event.floorChangePct > 0
   ) {
     lines.push(`📈 Floor +${event.floorChangePct.toFixed(1)}%`);
+  }
+
+  if (collection.hashtags && collection.hashtags.length > 0) {
+    lines.push(collection.hashtags.join(" "));
   }
 
   return lines.join("\n");

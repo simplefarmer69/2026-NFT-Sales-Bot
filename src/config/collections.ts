@@ -11,6 +11,7 @@ type RawCollection = {
   communityCallToAction?: unknown;
   communityUrl?: unknown;
   minPriceEth?: unknown;
+  hashtags?: unknown;
 };
 
 function asString(name: string, value: unknown, where: string): string {
@@ -45,6 +46,22 @@ function asOptionalNumber(value: unknown, where: string, name: string): number |
   return n;
 }
 
+function asOptionalHashtags(value: unknown, where: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error(`${where}: hashtags must be an array of strings`);
+  }
+  const tags = value
+    .map((tag, i) => {
+      if (typeof tag !== "string" || tag.trim().length === 0) {
+        throw new Error(`${where}: hashtags[${i}] must be a non-empty string`);
+      }
+      const trimmed = tag.trim().replace(/\s+/g, "");
+      return trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
+    });
+  return tags.length > 0 ? tags : undefined;
+}
+
 function parseOne(raw: RawCollection, idx: number): TrackedCollection {
   const where = `collections[${idx}]`;
   const slug = asString("slug", raw.slug, where).toLowerCase();
@@ -61,6 +78,7 @@ function parseOne(raw: RawCollection, idx: number): TrackedCollection {
     communityCallToAction: asString("communityCallToAction", raw.communityCallToAction, where),
     communityUrl: asString("communityUrl", raw.communityUrl, where),
     minPriceEth: asOptionalNumber(raw.minPriceEth, where, "minPriceEth"),
+    hashtags: asOptionalHashtags(raw.hashtags, where),
   };
 }
 
