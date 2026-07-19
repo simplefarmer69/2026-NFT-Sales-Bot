@@ -11,11 +11,11 @@ export const STONKBROKER_COLLECTION: TrackedCollection = {
   contract: "0x539cdd042c2f3d93ebc5be7dfff0c79f3b4fabf0",
   chainId: 4663,
   displayName: "StonkBroker",
-  emoji: "📈",
-  communityCallToAction: "CLOCK IN ➡️",
+  emoji: "",
+  communityCallToAction: "CLOCK IN",
   communityUrl: "https://www.stonkbrokers.cash/marketplace",
   minPriceEth: null,
-  hashtags: ["#StonkBrokers"],
+  // No hashtags — ticker line ($Stonkbroker $AAPL …) is rendered by the formatter.
 };
 
 /**

@@ -1,5 +1,8 @@
 import type { CanonicalSaleEvent, TrackedCollection } from "../types.js";
 
+/** Live StonkBrokers mainnet stock-token tickers (Robinhood Chain deploy). */
+export const STONKBROKER_STOCK_TICKERS = ["AAPL", "AMZN", "NVDA"] as const;
+
 /** Title-case a marketplace name like "opensea" → "Opensea", "blur" → "Blur". */
 function prettyMarketplace(raw: string | null | undefined): string {
   if (!raw) return "Unknown";
@@ -20,36 +23,30 @@ function formatEth(value: number | null): string {
   return value.toFixed(4);
 }
 
-/** Swap leftover dog/paw branding for stock-desk emojis. */
-function stockifyEmoji(raw: string): string {
-  if (/[🐾🐕🐶🦮🦴]/.test(raw)) return "📈";
-  return raw;
+function isStonkBroker(collection: TrackedCollection): boolean {
+  return collection.slug === "stonkbroker" || collection.openseaSlug === "stonkbrokers-434284142";
 }
 
 /**
- * Render the X post body for a sale.
+ * StonkBroker sales: no emojis, no hashtags. Tickers close the post.
  *
- * Layout:
- *   {emoji} {displayName} #{tokenId} SOLD
- *   💰 {priceEth} ETH
- *   📊 {Marketplace}
- *   💹 {seller→buyer}
+ *   StonkBroker #4347 SOLD
+ *   0.050 ETH
+ *   Opensea
+ *   0x1234…abcd → 0x5678…ef01
  *   {assetUrl}
- *   {communityCallToAction}: {communityUrl}
- *   📈 Floor +{X.X}%        (only if positive AND >=24h baseline AND enabled)
- *   {#hashtags}             (only if the collection defines any)
- *
- * The 280-character truncation in the X client is the final guardrail.
+ *   CLOCK IN https://www.stonkbrokers.cash/marketplace
+ *   $Stonkbroker $AAPL $AMZN $NVDA
  */
-export function renderSaleAlert(input: {
+function renderStonkBrokerAlert(input: {
   event: CanonicalSaleEvent;
   collection: TrackedCollection;
-  showFloorLine: boolean;
 }): string {
-  const { event, collection, showFloorLine } = input;
+  const { event, collection } = input;
   const lines: string[] = [];
 
-  lines.push(`${stockifyEmoji(collection.emoji)} ${collection.displayName} #${event.tokenId} SOLD`);
+  lines.push(`${collection.displayName} #${event.tokenId} SOLD`);
+
   const symbol = (event.paymentSymbol ?? "ETH").replace(/^\$/, "");
   const price =
     event.priceEth === null || !Number.isFinite(event.priceEth)
@@ -65,11 +62,53 @@ export function renderSaleAlert(input: {
     event.ethFee > 0
       ? ` (+ ${formatEth(event.ethFee)} ETH fee)`
       : "";
-  lines.push(`💰 ${price} ${unit}${fee}`);
-  lines.push(`📊 ${event.marketplace === "anvil" ? "Anvil AMM" : prettyMarketplace(event.marketplace)}`);
-  lines.push(`💹 ${shortenAddress(event.seller)} → ${shortenAddress(event.buyer)}`);
+  lines.push(`${price} ${unit}${fee}`);
+  lines.push(event.marketplace === "anvil" ? "Anvil AMM" : prettyMarketplace(event.marketplace));
+  lines.push(`${shortenAddress(event.seller)} → ${shortenAddress(event.buyer)}`);
   if (event.assetUrl) lines.push(event.assetUrl);
-  // Arrow CTAs ("CLOCK IN ➡️") skip the colon so the line reads naturally.
+
+  // Plain CTA — no emoji arrow.
+  const cta = collection.communityCallToAction.replace(/(?:➡️|→|➜|👉)\s*$/u, "").trim() || "CLOCK IN";
+  lines.push(`${cta} ${collection.communityUrl}`);
+
+  const tickers = [
+    "$Stonkbroker",
+    ...STONKBROKER_STOCK_TICKERS.map((t) => `$${t}`),
+  ];
+  lines.push(tickers.join(" "));
+
+  return lines.join("\n");
+}
+
+/**
+ * Render the X post body for a sale.
+ *
+ * StonkBroker posts use a dedicated no-emoji / ticker footer layout.
+ * Other collections keep the stock-desk emoji template.
+ */
+export function renderSaleAlert(input: {
+  event: CanonicalSaleEvent;
+  collection: TrackedCollection;
+  showFloorLine: boolean;
+}): string {
+  if (isStonkBroker(input.collection)) {
+    return renderStonkBrokerAlert(input);
+  }
+
+  const { event, collection, showFloorLine } = input;
+  const lines: string[] = [];
+
+  lines.push(`${collection.displayName} #${event.tokenId} SOLD`);
+  const symbol = (event.paymentSymbol ?? "ETH").replace(/^\$/, "");
+  const price =
+    event.priceEth === null || !Number.isFinite(event.priceEth)
+      ? "?"
+      : formatEth(event.priceEth);
+  const unit = symbol === "ETH" ? "ETH" : `$${symbol}`;
+  lines.push(`${price} ${unit}`);
+  lines.push(prettyMarketplace(event.marketplace));
+  lines.push(`${shortenAddress(event.seller)} → ${shortenAddress(event.buyer)}`);
+  if (event.assetUrl) lines.push(event.assetUrl);
   const cta = collection.communityCallToAction;
   const hasArrow = /(?:➡️|→|➜|👉)\s*$/u.test(cta);
   lines.push(hasArrow ? `${cta} ${collection.communityUrl}` : `${cta}: ${collection.communityUrl}`);
@@ -80,7 +119,7 @@ export function renderSaleAlert(input: {
     Number.isFinite(event.floorChangePct) &&
     event.floorChangePct > 0
   ) {
-    lines.push(`📈 Floor +${event.floorChangePct.toFixed(1)}%`);
+    lines.push(`Floor +${event.floorChangePct.toFixed(1)}%`);
   }
 
   if (collection.hashtags && collection.hashtags.length > 0) {

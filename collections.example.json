@@ -28,10 +28,9 @@
     "contract": "0x539CdD042c2f3d93EbC5BE7DfFf0c79F3B4fAbF0",
     "chainId": 4663,
     "displayName": "StonkBroker",
-    "emoji": "📈",
-    "communityCallToAction": "CLOCK IN ➡️",
+    "emoji": "-",
+    "communityCallToAction": "CLOCK IN",
     "communityUrl": "https://www.stonkbrokers.cash/marketplace",
-    "minPriceEth": null,
-    "hashtags": ["#StonkBrokers"]
+    "minPriceEth": null
   }
 ]
