@@ -1,4 +1,5 @@
 import { loadCollections } from "./config/collections.js";
+import { ensureStonkBrokerTracked } from "./config/default-collections.js";
 import { loadEnv } from "./config/env.js";
 import { AlertBotDb } from "./db.js";
 import { runMigrations } from "./db/migrate.js";
@@ -53,13 +54,21 @@ async function main(): Promise<void> {
     await runMigrations(env.databaseUrl);
   }
 
-  const collections: TrackedCollection[] = loadCollections({
-    path: env.collectionsPath,
-    json: env.collectionsJson,
-  });
+  const collections: TrackedCollection[] = ensureStonkBrokerTracked(
+    loadCollections({
+      path: env.collectionsPath,
+      json: env.collectionsJson,
+    }),
+  );
   console.log(
     `[boot] tracking ${collections.length} collection(s): ${collections.map((c) => c.slug).join(", ")}`,
   );
+  const stonk = collections.find((c) => c.slug === "stonkbroker");
+  if (stonk) {
+    console.log(
+      `[boot] stonkbroker chainId=${stonk.chainId} opensea=${stonk.openseaSlug} cta="${stonk.communityCallToAction}"`,
+    );
+  }
 
   const db = new AlertBotDb(env.databaseUrl);
   await db.ping();

@@ -91,6 +91,17 @@ function parseNftId(nftId: string | undefined): { contract: `0x${string}` | null
   return { contract: normalizeAddress(parts[1]), tokenId: parts[2] ?? null };
 }
 
+/** OpenSea asset path segment for a given EVM chain id. */
+function openSeaChainSlug(chainId: number): string {
+  if (chainId === 4663) return "robinhood";
+  return "ethereum";
+}
+
+function explorerTxUrl(chainId: number, txHash: string): string {
+  if (chainId === 4663) return `https://robinhoodchain.blockscout.com/tx/${txHash}`;
+  return `https://etherscan.io/tx/${txHash}`;
+}
+
 /**
  * Convert a raw OpenSea v2 sale event into our canonical shape. Returns null if
  * the event is missing fields we require for safe alerting (tx hash, token id).
@@ -131,7 +142,7 @@ export function normalizeOpenSeaSale(
     sale.nft?.opensea_url ??
     sale.item?.permalink ??
     sale.asset?.permalink ??
-    `https://opensea.io/assets/ethereum/${contract}/${tokenId}`;
+    `https://opensea.io/assets/${openSeaChainSlug(collection.chainId)}/${contract}/${tokenId}`;
   const imageUrl =
     sale.nft?.display_image_url ??
     sale.nft?.image_url ??
@@ -155,7 +166,7 @@ export function normalizeOpenSeaSale(
     priceUsd,
     assetUrl,
     imageUrl,
-    txUrl: `https://etherscan.io/tx/${txHash}`,
+    txUrl: explorerTxUrl(collection.chainId, txHash),
     floorChangePct: null,
     eventId: `${txHash}:${collection.slug}:${tokenId}`,
     payload: sale,

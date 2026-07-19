@@ -23,14 +23,15 @@
     "hashtags": ["#PupCup", "#WorldPupProtocol"]
   },
   {
-    "slug": "bayc",
-    "openseaSlug": "boredapeyachtclub",
-    "contract": "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d",
-    "chainId": 1,
-    "displayName": "BAYC",
-    "emoji": "🐒",
-    "communityCallToAction": "The yacht club grows",
-    "communityUrl": "https://opensea.io/collection/boredapeyachtclub",
-    "minPriceEth": 10
+    "slug": "stonkbroker",
+    "openseaSlug": "stonkbrokers-434284142",
+    "contract": "0x539CdD042c2f3d93EbC5BE7DfFf0c79F3B4fAbF0",
+    "chainId": 4663,
+    "displayName": "StonkBroker",
+    "emoji": "📈",
+    "communityCallToAction": "CLOCK IN ➡️",
+    "communityUrl": "https://www.stonkbrokers.cash/marketplace",
+    "minPriceEth": null,
+    "hashtags": ["#StonkBrokers"]
   }
 ]

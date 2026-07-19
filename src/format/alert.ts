@@ -48,7 +48,10 @@ export function renderSaleAlert(input: {
   lines.push(`🐕 ${prettyMarketplace(event.marketplace)}`);
   lines.push(`🐕 ${shortenAddress(event.seller)} → ${shortenAddress(event.buyer)}`);
   if (event.assetUrl) lines.push(event.assetUrl);
-  lines.push(`${collection.communityCallToAction}: ${collection.communityUrl}`);
+  // Arrow CTAs ("CLOCK IN ➡️") skip the colon so the line reads naturally.
+  const cta = collection.communityCallToAction;
+  const hasArrow = /(?:➡️|→|➜|👉)\s*$/u.test(cta);
+  lines.push(hasArrow ? `${cta} ${collection.communityUrl}` : `${cta}: ${collection.communityUrl}`);
 
   if (
     showFloorLine &&
