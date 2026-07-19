@@ -169,9 +169,19 @@ async function main(): Promise<void> {
             `[post] ok slug=${event.collectionSlug} token=${event.tokenId} priceEth=${event.priceEth ?? "?"}`,
           );
         } catch (error) {
+          const message = (error as Error).message;
           console.warn(
-            `[post] FAILED slug=${event.collectionSlug} token=${event.tokenId} — ${(error as Error).message}`,
+            `[post] FAILED slug=${event.collectionSlug} token=${event.tokenId} — ${message}`,
           );
+          // Rate-limited posts are transient: un-mark the sale so the next
+          // cycle retries it once the X window resets. Permanent failures
+          // (401 bad creds, 403 forbidden) stay marked to avoid retry loops.
+          if (message.includes("429") || message.includes("rate-limit")) {
+            await db.releaseSaleEvent(event);
+            console.warn(
+              `[post] released slug=${event.collectionSlug} token=${event.tokenId} for retry after rate limit`,
+            );
+          }
         }
       }
     } catch (error) {

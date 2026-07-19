@@ -64,6 +64,21 @@ export class AlertBotDb {
     return result.rowCount === 1;
   }
 
+  /**
+   * Remove a sale from the dedupe table so it is retried next cycle.
+   * Used when the X post fails with a transient error (rate limit) — without
+   * this, a sale that 429s is marked seen and silently never posted.
+   */
+  public async releaseSaleEvent(event: CanonicalSaleEvent): Promise<void> {
+    await this.pool.query(
+      `
+      DELETE FROM nft_sale_alert_events
+      WHERE chain_id = $1 AND tx_hash = $2 AND log_index = $3 AND contract = $4 AND token_id = $5
+      `,
+      [event.chainId, event.txHash, event.logIndex, event.contract, event.tokenId],
+    );
+  }
+
   public async recordFloorSnapshot(collectionSlug: string, floorPriceEth: number): Promise<void> {
     if (!Number.isFinite(floorPriceEth) || floorPriceEth < 0) return;
     await this.pool.query(
