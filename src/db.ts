@@ -3,11 +3,10 @@ import type { CanonicalSaleEvent } from "./types.js";
 
 /**
  * Postgres-backed store for two things only:
- *   1. Dedupe — a UNIQUE constraint on (chain_id, tx_hash, log_index, contract,
- *      token_id) means inserting a duplicate is a no-op. We use the rowCount
- *      to learn whether a sale was new (1) or already-seen (0).
- *   2. Floor snapshots — every poll cycle we record the current floor. The
- *      "24h ago" baseline is the most recent snapshot taken at least 24h ago.
+ *   1. Dedupe + post status — UNIQUE on (chain_id, tx_hash, log_index, contract,
+ *      token_id). `posted=true` means we successfully tweeted; `posted=false`
+ *      means claim/retry (e.g. prior X failure).
+ *   2. Floor snapshots — every poll cycle we record the current floor.
  */
 export class AlertBotDb {
   private readonly pool: Pool;
@@ -25,19 +24,59 @@ export class AlertBotDb {
   }
 
   /**
-   * Returns true if this is the first time we've seen the event (newly inserted),
-   * false if it was already in the dedupe table.
+   * One-shot: mark legacy Seaport-RH rows as unposted so a single failed
+   * pre-fix insert can be retried. Safe across restarts (bot_meta gate).
    */
-  public async upsertSaleEvent(event: CanonicalSaleEvent): Promise<boolean> {
-    const result = await this.pool.query(
+  public async unstickSeaportRhOnce(): Promise<number> {
+    const gate = await this.pool.query<{ value: string }>(
+      `SELECT value FROM bot_meta WHERE key = 'seaport_unstick_v1'`,
+    );
+    if (gate.rows[0]?.value === "done") return 0;
+
+    // Legacy rows (everything currently in the table) were inserted under the
+    // old mark-before-post model. Non-Seaport collections already tweeted
+    // successfully in production — leave them alone. Seaport-RH rows are the
+    // ones stuck as dedupe_skip with no tweet.
+    await this.pool.query(
+      `
+      UPDATE nft_sale_alert_events
+      SET posted = true
+      WHERE event_id NOT LIKE '%:seaport-rh:%'
+      `,
+    );
+    const released = await this.pool.query(
+      `
+      UPDATE nft_sale_alert_events
+      SET posted = false
+      WHERE event_id LIKE '%:seaport-rh:%'
+      `,
+    );
+
+    await this.pool.query(
+      `
+      INSERT INTO bot_meta (key, value, updated_at) VALUES ('seaport_unstick_v1', 'done', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = 'done', updated_at = NOW()
+      `,
+    );
+
+    return released.rowCount ?? 0;
+  }
+
+  /**
+   * Claim a sale for posting.
+   *   - `claim`  — new row or prior failed attempt (posted=false); caller should post
+   *   - `done`   — already tweeted successfully; skip
+   */
+  public async claimSaleEvent(event: CanonicalSaleEvent): Promise<"claim" | "done"> {
+    const inserted = await this.pool.query(
       `
       INSERT INTO nft_sale_alert_events (
         chain_id, contract, token_id, tx_hash, log_index, block_number, event_timestamp,
         marketplace, buyer, seller, price_eth, price_usd, asset_url, tx_url,
-        collection_slug, event_id, payload
+        collection_slug, event_id, payload, posted
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7,
-        $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb
+        $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, false
       )
       ON CONFLICT (chain_id, tx_hash, log_index, contract, token_id) DO NOTHING
       `,
@@ -61,13 +100,38 @@ export class AlertBotDb {
         JSON.stringify(event.payload ?? {}),
       ],
     );
-    return result.rowCount === 1;
+
+    if (inserted.rowCount === 1) return "claim";
+
+    const existing = await this.pool.query<{ posted: boolean }>(
+      `
+      SELECT posted FROM nft_sale_alert_events
+      WHERE chain_id = $1 AND tx_hash = $2 AND log_index = $3 AND contract = $4 AND token_id = $5
+      `,
+      [event.chainId, event.txHash, event.logIndex, event.contract, event.tokenId],
+    );
+    if (existing.rows[0]?.posted === true) return "done";
+    return "claim";
+  }
+
+  public async markSalePosted(event: CanonicalSaleEvent): Promise<void> {
+    await this.pool.query(
+      `
+      UPDATE nft_sale_alert_events
+      SET posted = true
+      WHERE chain_id = $1 AND tx_hash = $2 AND log_index = $3 AND contract = $4 AND token_id = $5
+      `,
+      [event.chainId, event.txHash, event.logIndex, event.contract, event.tokenId],
+    );
+  }
+
+  /** @deprecated prefer claimSaleEvent + markSalePosted */
+  public async upsertSaleEvent(event: CanonicalSaleEvent): Promise<boolean> {
+    return (await this.claimSaleEvent(event)) === "claim";
   }
 
   /**
    * Remove a sale from the dedupe table so it is retried next cycle.
-   * Used when the X post fails with a transient error (rate limit) — without
-   * this, a sale that 429s is marked seen and silently never posted.
    */
   public async releaseSaleEvent(event: CanonicalSaleEvent): Promise<void> {
     await this.pool.query(
@@ -87,14 +151,6 @@ export class AlertBotDb {
     );
   }
 
-  /**
-   * Best-available baseline floor for a collection.
-   *   1. Prefer the most recent snapshot taken at least 24h ago (true rolling 24h delta).
-   *   2. If we don't yet have 24h of history, fall back to the OLDEST snapshot we have
-   *      so day-1 still produces a meaningful (early-baseline-flagged) value. The
-   *      caller is responsible for suppressing the line until ageHours >= 24.
-   *   3. If we have no snapshots at all (or only one taken just now), return null.
-   */
   public async getFloorBaseline(collectionSlug: string): Promise<{
     floorPriceEth: number;
     takenAt: Date;
@@ -139,7 +195,6 @@ export class AlertBotDb {
     };
   }
 
-  /** Housekeeping: delete snapshots older than `days` days. */
   public async pruneFloorSnapshotsOlderThan(days: number): Promise<void> {
     if (!Number.isFinite(days) || days < 1) return;
     await this.pool.query(

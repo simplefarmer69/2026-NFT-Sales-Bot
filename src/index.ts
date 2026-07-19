@@ -94,6 +94,10 @@ async function main(): Promise<void> {
   const db = new AlertBotDb(env.databaseUrl);
   await db.ping();
   console.log("[boot] database OK");
+  const unstuck = await db.unstickSeaportRhOnce();
+  if (unstuck > 0) {
+    console.log(`[boot] unstuck ${unstuck} Seaport-RH sale(s) for retry (mark-before-post bug)`);
+  }
 
   const opensea = new OpenSeaEventsProvider({
     baseUrl: env.openSeaBaseUrl,
@@ -168,7 +172,7 @@ async function main(): Promise<void> {
         `[loop] candidates opensea=${openSeaSales.length} seaport-rh=${seaportSales.length} total=${ordered.length}`,
       );
 
-      // 3. For each event: dedupe via the DB unique constraint, then post.
+      // 3. Claim → post → mark posted. Never treat a failed tweet as "done".
       let posted = 0;
       let skippedDedupe = 0;
       for (const event of ordered) {
@@ -184,9 +188,12 @@ async function main(): Promise<void> {
           continue;
         }
 
-        const inserted = await db.upsertSaleEvent(event);
-        if (!inserted) {
+        const claim = await db.claimSaleEvent(event);
+        if (claim === "done") {
           skippedDedupe += 1;
+          console.log(
+            `[loop] dedupe_skip slug=${event.collectionSlug} token=${event.tokenId} tx=${event.txHash.slice(0, 12)}…`,
+          );
           continue;
         }
 
@@ -202,6 +209,7 @@ async function main(): Promise<void> {
 
         try {
           await x.sendPost(text, enrichedEvent.imageUrl);
+          await db.markSalePosted(event);
           posted += 1;
           console.log(
             `[post] ok slug=${event.collectionSlug} token=${event.tokenId} priceEth=${event.priceEth ?? "?"}`,
@@ -211,12 +219,17 @@ async function main(): Promise<void> {
           console.warn(
             `[post] FAILED slug=${event.collectionSlug} token=${event.tokenId} — ${message}`,
           );
-          // Transient failures: un-mark so the next cycle retries.
-          // Permanent (401/403) stay marked to avoid retry loops.
-          if (isTransientPostFailure(message)) {
-            await db.releaseSaleEvent(event);
+          // Leave posted=false so the next cycle retries. Permanent auth
+          // failures: mark done to avoid an infinite fail loop.
+          if (message.includes("401") || message.includes("403")) {
+            await db.markSalePosted(event);
             console.warn(
-              `[post] released slug=${event.collectionSlug} token=${event.tokenId} for retry`,
+              `[post] marked done (auth failure) slug=${event.collectionSlug} token=${event.tokenId}`,
+            );
+          } else if (!isTransientPostFailure(message)) {
+            // Unknown non-transient: still retry a few times via posted=false.
+            console.warn(
+              `[post] will retry slug=${event.collectionSlug} token=${event.tokenId}`,
             );
           }
         }
