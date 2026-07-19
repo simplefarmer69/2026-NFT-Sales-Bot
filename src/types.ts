@@ -16,7 +16,7 @@ export type TrackedCollection = {
   chainId: number;
   /** Singular display name, used in the alert text. e.g. "Pixel Pup", "BAYC". */
   displayName: string;
-  /** Emoji prepended to the alert. e.g. "🐾", "🐒". */
+  /** Emoji prepended to the alert. Prefer stock/desk marks (📈, 💹); dog emojis are stockified at render. */
   emoji: string;
   /** Phrase printed before the collection link. e.g. "The pack is growing". */
   communityCallToAction: string;

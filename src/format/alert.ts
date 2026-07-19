@@ -20,14 +20,20 @@ function formatEth(value: number | null): string {
   return value.toFixed(4);
 }
 
+/** Swap leftover dog/paw branding for stock-desk emojis. */
+function stockifyEmoji(raw: string): string {
+  if (/[🐾🐕🐶🦮🦴]/.test(raw)) return "📈";
+  return raw;
+}
+
 /**
  * Render the X post body for a sale.
  *
  * Layout:
  *   {emoji} {displayName} #{tokenId} SOLD
  *   💰 {priceEth} ETH
- *   🐕 {Marketplace}
- *   🐕 {seller→buyer}
+ *   📊 {Marketplace}
+ *   💹 {seller→buyer}
  *   {assetUrl}
  *   {communityCallToAction}: {communityUrl}
  *   📈 Floor +{X.X}%        (only if positive AND >=24h baseline AND enabled)
@@ -43,7 +49,7 @@ export function renderSaleAlert(input: {
   const { event, collection, showFloorLine } = input;
   const lines: string[] = [];
 
-  lines.push(`${collection.emoji} ${collection.displayName} #${event.tokenId} SOLD`);
+  lines.push(`${stockifyEmoji(collection.emoji)} ${collection.displayName} #${event.tokenId} SOLD`);
   const symbol = (event.paymentSymbol ?? "ETH").replace(/^\$/, "");
   const price =
     event.priceEth === null || !Number.isFinite(event.priceEth)
@@ -60,8 +66,8 @@ export function renderSaleAlert(input: {
       ? ` (+ ${formatEth(event.ethFee)} ETH fee)`
       : "";
   lines.push(`💰 ${price} ${unit}${fee}`);
-  lines.push(`🐕 ${event.marketplace === "anvil" ? "Anvil AMM" : prettyMarketplace(event.marketplace)}`);
-  lines.push(`🐕 ${shortenAddress(event.seller)} → ${shortenAddress(event.buyer)}`);
+  lines.push(`📊 ${event.marketplace === "anvil" ? "Anvil AMM" : prettyMarketplace(event.marketplace)}`);
+  lines.push(`💹 ${shortenAddress(event.seller)} → ${shortenAddress(event.buyer)}`);
   if (event.assetUrl) lines.push(event.assetUrl);
   // Arrow CTAs ("CLOCK IN ➡️") skip the colon so the line reads naturally.
   const cta = collection.communityCallToAction;
