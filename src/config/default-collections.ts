@@ -2,8 +2,8 @@ import type { TrackedCollection } from "../types.js";
 
 /**
  * Canonical StonkBrokers entry — Robinhood Chain (4663).
- * Buys come from BOTH OpenSea (Robinhood) and the Anvil AMM vault.
- * The main loop polls both providers; DB dedupe prevents double-posts.
+ * OpenSea marketplace sales on Robinhood; Anvil AMM buys are not posted
+ * (provider kept in repo but not wired into the main loop for now).
  */
 export const STONKBROKER_COLLECTION: TrackedCollection = {
   slug: "stonkbroker",
