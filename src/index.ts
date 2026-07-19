@@ -80,11 +80,15 @@ async function main(): Promise<void> {
   console.log(
     `[boot] tracking ${collections.length} collection(s): ${collections.map((c) => c.slug).join(", ")}`,
   );
-  const stonk = collections.find((c) => c.slug === "stonkbroker");
+  const stonk = collections.find(
+    (c) => c.slug === "stonkbroker" || c.openseaSlug === "stonkbrokers-434284142",
+  );
   if (stonk) {
     console.log(
-      `[boot] stonkbroker chainId=${stonk.chainId} opensea=${stonk.openseaSlug} cta="${stonk.communityCallToAction}"`,
+      `[boot] stonkbroker chainId=${stonk.chainId} opensea=${stonk.openseaSlug} contract=${stonk.contract} cta="${stonk.communityCallToAction}"`,
     );
+  } else {
+    console.error("[boot] FATAL: stonkbroker missing from tracking list after ensureStonkBrokerTracked");
   }
 
   const db = new AlertBotDb(env.databaseUrl);

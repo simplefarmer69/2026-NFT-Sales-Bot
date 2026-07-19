@@ -85,6 +85,14 @@ export class OpenSeaEventsProvider {
     const baseAfter = getUnixSeconds(new Date()) - this.config.lookbackSeconds;
 
     for (const collection of collections) {
+      // Robinhood StonkBrokers OpenSea fills are detected via Blockscout Seaport
+      // (seaport-rh). The OpenSea events API is unreliable for this collection
+      // and racing it just adds noise / rate-limit pressure.
+      if (collection.chainId === 4663 || collection.slug === "stonkbroker") {
+        console.log(`[opensea] ${collection.slug}: skipped (handled by seaport-rh)`);
+        continue;
+      }
+
       try {
         const after = this.afterByCollection.get(collection.slug) ?? baseAfter;
         const slug = collection.openseaSlug;

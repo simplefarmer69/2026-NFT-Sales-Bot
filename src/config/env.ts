@@ -69,7 +69,9 @@ export function loadEnv(): AppEnv {
     databaseUrl: requireString("DATABASE_URL"),
     openSeaApiKey: requireString("OPENSEA_API_KEY"),
     openSeaBaseUrl: process.env.OPENSEA_BASE_URL ?? "https://api.opensea.io",
-    openSeaPollLookbackSec: parsePositiveNumber("OPENSEA_POLL_LOOKBACK_SEC", 900),
+    // 30m default — StonkBrokers AMM traffic is dense; a short window + thin
+    // Blockscout page used to skip OpenSea/Seaport fills buried under sells.
+    openSeaPollLookbackSec: parsePositiveNumber("OPENSEA_POLL_LOOKBACK_SEC", 1800),
     xCredentials,
     collectionsPath,
     collectionsJson,
