@@ -87,7 +87,7 @@ async function main(): Promise<void> {
 
   const x = new XClient(env.xCredentials);
   console.log("[boot] X client ready (OAuth 1.0a)");
-  console.log("[boot] Anvil AMM Robinhood listener ready (Blockscout NFTBought)");
+  console.log("[boot] sources: OpenSea (all collections) + Anvil AMM NFTBought (StonkBrokers / Robinhood)");
 
   let lastFloorPruneAt = 0;
   const FLOOR_PRUNE_INTERVAL_MS = 60 * 60 * 1000;

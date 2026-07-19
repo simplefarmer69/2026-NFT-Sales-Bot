@@ -51,7 +51,7 @@ async function fetchJson<T>(url: string): Promise<T> {
 
 /**
  * Poll Robinhood Blockscout for Anvil AMM NFTBought events.
- * This is the real StonkBrokers buy path — OpenSea marketplace sales are rare/none.
+ * Complements OpenSea — Anvil vault swaps/snipes never appear as OpenSea sales.
  */
 export class AnvilAmmBuysProvider {
   private lastBlockBySlug = new Map<string, number>();

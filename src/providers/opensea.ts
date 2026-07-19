@@ -51,10 +51,6 @@ export class OpenSeaEventsProvider {
     const baseAfter = getUnixSeconds(new Date()) - this.config.lookbackSeconds;
 
     for (const collection of collections) {
-      // Robinhood / Anvil AMM collections are polled on-chain — OpenSea sales
-      // there are rare and a hard failure must not block ETH collection alerts.
-      if (collection.chainId === 4663) continue;
-
       try {
         const after = this.afterByCollection.get(collection.slug) ?? baseAfter;
         const slug = collection.openseaSlug;
@@ -104,6 +100,9 @@ export class OpenSeaEventsProvider {
         // Advance cursor by 1 second past the newest event we saw, so we never re-fetch
         // the same event but also never skip a same-second neighbor (DB dedupe catches dup case).
         this.afterByCollection.set(collection.slug, maxEventTs + 1);
+        if (totalForCollection > 0) {
+          console.log(`[opensea] ${collection.slug}: ${totalForCollection} sale(s) in lookback`);
+        }
       } catch (error) {
         console.warn(
           `[opensea] ${collection.slug} fetch failed — ${(error as Error).message}`,
