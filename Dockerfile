@@ -5,7 +5,7 @@ RUN npm install --no-audit --no-fund
 COPY tsconfig.json ./
 COPY src ./src
 COPY db ./db
-COPY collections.json ./
+COPY collections.example.json ./collections.json
 RUN npm run build
 
 FROM node:20-alpine
