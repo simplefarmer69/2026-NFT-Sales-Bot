@@ -64,17 +64,25 @@ function parseIsoTime(value: string | undefined): Date | null {
 }
 
 function parseEventTime(value: string | number | undefined): Date | null {
-  if (value === undefined) return null;
+  if (value === undefined || value === null) return null;
   if (typeof value === "number") {
-    return Number.isFinite(value) ? new Date(value * 1000) : null;
+    if (!Number.isFinite(value)) return null;
+    return new Date(value >= 1e12 ? value : value * 1000);
   }
-  return parseIsoTime(value);
+  const trimmed = value.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const n = Number(trimmed);
+    if (!Number.isFinite(n)) return null;
+    return new Date(n >= 1e12 ? n : n * 1000);
+  }
+  return parseIsoTime(trimmed);
 }
 
-function parseEthAmountRaw(raw: string | undefined): number | null {
+function parseEthAmountRaw(raw: string | undefined, decimals = 18): number | null {
   if (!raw || !/^\d+$/.test(raw)) return null;
   const asBigInt = BigInt(raw);
-  const asNumber = Number(asBigInt) / 1e18;
+  const divisor = 10 ** decimals;
+  const asNumber = Number(asBigInt) / divisor;
   return Number.isFinite(asNumber) ? asNumber : null;
 }
 
@@ -123,19 +131,31 @@ export function normalizeOpenSeaSale(
   const tokenId = parsed.tokenId ?? String(sale.asset?.token_id ?? sale.nft?.identifier ?? "");
   if (!tokenId) return null;
 
-  const txHash = typeof sale.transaction === "string" ? sale.transaction : sale.transaction?.hash;
+  const txRaw = sale.transaction as
+    | string
+    | { hash?: string; transaction_hash?: string; timestamp?: string; block_number?: string | number }
+    | undefined;
+  const txHash =
+    typeof txRaw === "string"
+      ? txRaw
+      : (txRaw?.hash ?? txRaw?.transaction_hash);
   if (!txHash || !/^0x[a-fA-F0-9]{64}$/.test(txHash)) return null;
 
-  const blockRaw = typeof sale.transaction === "string" ? undefined : sale.transaction?.block_number;
+  const blockRaw = typeof txRaw === "string" ? undefined : txRaw?.block_number;
   const blockNumber = blockRaw === undefined ? 0n : BigInt(blockRaw);
-  const txTimestamp = typeof sale.transaction === "string" ? undefined : sale.transaction?.timestamp;
-  const timestamp = parseEventTime(sale.event_timestamp) ?? parseIsoTime(txTimestamp);
+  const txTimestamp = typeof txRaw === "string" ? undefined : txRaw?.timestamp;
+  const timestamp = parseEventTime(sale.event_timestamp) ?? parseEventTime(txTimestamp);
 
   const buyer = normalizeAddress(
     readAddressLike(sale.buyer) ?? sale.winner_account?.address ?? sale.to_account?.address,
   );
   const seller = normalizeAddress(readAddressLike(sale.seller) ?? sale.from_account?.address);
-  const priceEth = parseEthAmountRaw(sale.payment?.quantity) ?? parseEthAmountRaw(sale.sale_price);
+  const paymentDecimals =
+    typeof sale.payment?.decimals === "number" && Number.isFinite(sale.payment.decimals)
+      ? sale.payment.decimals
+      : 18;
+  const priceEth =
+    parseEthAmountRaw(sale.payment?.quantity, paymentDecimals) ?? parseEthAmountRaw(sale.sale_price);
   const priceUsd = parseNumberish(sale.payment?.usd_price);
 
   const assetUrl =
@@ -143,12 +163,17 @@ export function normalizeOpenSeaSale(
     sale.item?.permalink ??
     sale.asset?.permalink ??
     `https://opensea.io/assets/${openSeaChainSlug(collection.chainId)}/${contract}/${tokenId}`;
-  const imageUrl =
+  const rawImage =
     sale.nft?.display_image_url ??
     sale.nft?.image_url ??
     sale.item?.metadata?.image_url ??
     sale.asset?.image_url ??
     null;
+  // data: SVG / unsupported schemes are unusable for X media upload.
+  const imageUrl =
+    rawImage && !rawImage.startsWith("data:") && !rawImage.includes("image/svg")
+      ? rawImage
+      : null;
 
   return {
     chainId: collection.chainId,

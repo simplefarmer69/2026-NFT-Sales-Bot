@@ -5,8 +5,25 @@ import { AlertBotDb } from "./db.js";
 import { runMigrations } from "./db/migrate.js";
 import { renderSaleAlert } from "./format/alert.js";
 import { OpenSeaEventsProvider } from "./providers/opensea.js";
+import { SeaportRobinhoodProvider } from "./providers/seaport-rh.js";
 import type { CanonicalSaleEvent, TrackedCollection } from "./types.js";
 import { XClient } from "./x/client.js";
+
+/** Transient X failures that should be retried next cycle (release dedupe). */
+function isTransientPostFailure(message: string): boolean {
+  return (
+    message.includes("429") ||
+    message.includes("rate-limit") ||
+    message.includes("503") ||
+    message.includes("502") ||
+    message.includes("504") ||
+    message.includes("request failed") ||
+    message.includes("aborted") ||
+    message.includes("Timeout") ||
+    message.includes("ECONNRESET") ||
+    message.includes("fetch failed")
+  );
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,9 +97,15 @@ async function main(): Promise<void> {
     lookbackSeconds: env.openSeaPollLookbackSec,
   });
 
+  // Blockscout Seaport watcher — OpenSea fills on Robinhood even if the
+  // OpenSea events API returns empty / rate-limits the key.
+  const seaportRh = new SeaportRobinhoodProvider({
+    lookbackSeconds: env.openSeaPollLookbackSec,
+  });
+
   const x = new XClient(env.xCredentials);
   console.log("[boot] X client ready (OAuth 1.0a)");
-  console.log("[boot] source: OpenSea only (Anvil AMM buys disabled)");
+  console.log("[boot] sources: OpenSea API + Robinhood Seaport (Blockscout); Anvil AMM off");
 
   let lastFloorPruneAt = 0;
   const FLOOR_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
@@ -131,27 +154,37 @@ async function main(): Promise<void> {
         lastFloorPruneAt = Date.now();
       }
 
-      // 2. Pull new sales from OpenSea only (Anvil AMM buys intentionally off).
-      const fetched = await withRetry("opensea.fetchLatestSales", () =>
-        opensea.fetchLatestSales(collections),
+      // 2. Pull new OpenSea sales (HTTP API + Robinhood Seaport on-chain backup).
+      const [openSeaSales, seaportSales] = await Promise.all([
+        withRetry("opensea.fetchLatestSales", () => opensea.fetchLatestSales(collections)),
+        withRetry("seaportRh.fetchLatestSales", () => seaportRh.fetchLatestSales(collections)),
+      ]);
+      const ordered = sortChronological([...openSeaSales, ...seaportSales]);
+      console.log(
+        `[loop] candidates opensea=${openSeaSales.length} seaport-rh=${seaportSales.length} total=${ordered.length}`,
       );
-      const ordered = sortChronological(fetched);
 
       // 3. For each event: dedupe via the DB unique constraint, then post.
+      let posted = 0;
+      let skippedDedupe = 0;
       for (const event of ordered) {
         const collection = collections.find((c) => c.slug === event.collectionSlug);
         if (!collection) continue;
 
-        // Min-price gate (per collection).
+        // Min-price gate (per collection). Skip only when we have a price.
         if (
           collection.minPriceEth !== null &&
-          (event.priceEth === null || event.priceEth < collection.minPriceEth)
+          event.priceEth !== null &&
+          event.priceEth < collection.minPriceEth
         ) {
           continue;
         }
 
         const inserted = await db.upsertSaleEvent(event);
-        if (!inserted) continue;
+        if (!inserted) {
+          skippedDedupe += 1;
+          continue;
+        }
 
         const enrichedEvent: CanonicalSaleEvent = {
           ...event,
@@ -165,6 +198,7 @@ async function main(): Promise<void> {
 
         try {
           await x.sendPost(text, enrichedEvent.imageUrl);
+          posted += 1;
           console.log(
             `[post] ok slug=${event.collectionSlug} token=${event.tokenId} priceEth=${event.priceEth ?? "?"}`,
           );
@@ -173,16 +207,18 @@ async function main(): Promise<void> {
           console.warn(
             `[post] FAILED slug=${event.collectionSlug} token=${event.tokenId} — ${message}`,
           );
-          // Rate-limited posts are transient: un-mark the sale so the next
-          // cycle retries it once the X window resets. Permanent failures
-          // (401 bad creds, 403 forbidden) stay marked to avoid retry loops.
-          if (message.includes("429") || message.includes("rate-limit")) {
+          // Transient failures: un-mark so the next cycle retries.
+          // Permanent (401/403) stay marked to avoid retry loops.
+          if (isTransientPostFailure(message)) {
             await db.releaseSaleEvent(event);
             console.warn(
-              `[post] released slug=${event.collectionSlug} token=${event.tokenId} for retry after rate limit`,
+              `[post] released slug=${event.collectionSlug} token=${event.tokenId} for retry`,
             );
           }
         }
+      }
+      if (ordered.length > 0) {
+        console.log(`[loop] posted=${posted} dedupe_skip=${skippedDedupe}`);
       }
     } catch (error) {
       console.error(`[loop] cycle error — ${(error as Error).message}`);

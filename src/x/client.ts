@@ -8,6 +8,9 @@ const EXTENSION_BY_MIME: Record<SupportedImageMime, string> = {
   "image/webp": ".webp",
 };
 
+const IMAGE_FETCH_TIMEOUT_MS = 8_000;
+const X_REQUEST_TIMEOUT_MS = 20_000;
+
 function detectSupportedMime(contentType: string): SupportedImageMime | null {
   if (contentType.startsWith("image/png")) return "image/png";
   if (contentType.startsWith("image/jpeg") || contentType.startsWith("image/jpg")) return "image/jpeg";
@@ -66,6 +69,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * X API v2 client with:
  *  - OAuth 1.0a HMAC-SHA1 signing
@@ -74,8 +87,8 @@ function sleep(ms: number): Promise<void> {
  *  - 429 retry honoring `retry-after` and `x-rate-limit-reset` headers
  *  - Hard 5-minute total wait ceiling per post so a stuck retry can't block
  *    the rest of a sales burst
- *  - Image upload with content negotiation (png/jpeg/webp), v2 + v1.1
- *    response field compatibility, and graceful text-only fallback on failure
+ *  - Image upload with content negotiation (png/jpeg/webp), timeouts, and
+ *    graceful text-only fallback (never use media_key as media_ids)
  */
 export class XClient {
   private readonly createTweetUrl = "https://api.x.com/2/tweets";
@@ -109,14 +122,27 @@ export class XClient {
   private async fetchSupportedImage(
     imageUrl: string,
   ): Promise<{ buffer: Buffer; contentType: SupportedImageMime } | null> {
-    // Some hosts default to AVIF (which X won't accept). We content-negotiate
-    // through png → jpeg → webp until we get something X can ingest.
+    // data: / SVG / AVIF cannot be attached to X posts — skip immediately so
+    // we never stall the post queue on unusable media.
+    if (
+      imageUrl.startsWith("data:") ||
+      imageUrl.includes(".svg") ||
+      imageUrl.includes("image/svg")
+    ) {
+      console.warn(`[x.uploadMedia] skipping unsupported image URL: ${imageUrl.slice(0, 80)}`);
+      return null;
+    }
+
     const acceptHeaders: SupportedImageMime[] = ["image/png", "image/jpeg", "image/webp"];
     let lastError: string | null = null;
 
     for (const accept of acceptHeaders) {
       try {
-        const response = await fetch(imageUrl, { headers: { accept } });
+        const response = await fetchWithTimeout(
+          imageUrl,
+          { headers: { accept } },
+          IMAGE_FETCH_TIMEOUT_MS,
+        );
         if (!response.ok) {
           lastError = `fetch ${accept} -> ${response.status}`;
           continue;
@@ -130,6 +156,11 @@ export class XClient {
         const buffer = Buffer.from(await response.arrayBuffer());
         if (buffer.byteLength === 0) {
           lastError = `fetch ${accept} returned 0 bytes`;
+          continue;
+        }
+        // X image hard cap is 5 MB.
+        if (buffer.byteLength > 5 * 1024 * 1024) {
+          lastError = `fetch ${accept} returned ${buffer.byteLength} bytes (>5MB)`;
           continue;
         }
         return { buffer, contentType: detected };
@@ -174,31 +205,42 @@ export class XClient {
       formData.append("media_category", "tweet_image");
       formData.append("media_type", fetched.contentType);
 
-      const response = await fetch(this.mediaUploadUrl, {
-        method: "POST",
-        headers: { Authorization: this.createAuthorization("POST", this.mediaUploadUrl) },
-        body: formData,
-      });
+      let response: Response;
+      try {
+        response = await fetchWithTimeout(
+          this.mediaUploadUrl,
+          {
+            method: "POST",
+            headers: { Authorization: this.createAuthorization("POST", this.mediaUploadUrl) },
+            body: formData,
+          },
+          X_REQUEST_TIMEOUT_MS,
+        );
+      } catch (error) {
+        console.warn(`[x.uploadMedia] request failed: ${(error as Error).message}`);
+        return null;
+      }
 
       if (response.ok) {
-        // X v2 returns `{ data: { id, media_key } }`; legacy v1.1 used
-        // `{ media_id_string }`. Read both so the bot doesn't silently fall
-        // through to a text-only tweet when X migrates the response shape.
+        // Prefer numeric media id for POST /2/tweets media.media_ids.
+        // media_key (e.g. "3_123…") is NOT valid there and causes 400s.
         const payload = (await response.json()) as {
           data?: { id?: string; media_key?: string };
           media_id_string?: string;
+          media_id?: number | string;
           id?: string;
         };
         const mediaId =
           payload?.data?.id ??
-          payload?.data?.media_key ??
           payload?.media_id_string ??
+          (payload?.media_id !== undefined ? String(payload.media_id) : null) ??
           payload?.id ??
           null;
         if (!mediaId) {
           console.warn(
             `[x.uploadMedia] upload OK but no media id in response: ${JSON.stringify(payload).slice(0, 200)}`,
           );
+          return null;
         }
         return mediaId;
       }
@@ -242,7 +284,7 @@ export class XClient {
     const mediaId = imageUrl ? await this.uploadMediaFromUrl(imageUrl) : null;
     if (imageUrl && !mediaId) {
       console.warn(
-        `[x.sendPost] image was supplied but media upload failed; posting text-only — imageUrl=${imageUrl}`,
+        `[x.sendPost] image was supplied but media upload failed; posting text-only — imageUrl=${imageUrl.slice(0, 120)}`,
       );
     }
     const payload: { text: string; media?: { media_ids: string[] } } = { text: text.slice(0, 280) };
@@ -251,11 +293,20 @@ export class XClient {
     let totalWaited = 0;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const authorization = this.createAuthorization("POST", this.createTweetUrl);
-      const response = await fetch(this.createTweetUrl, {
-        method: "POST",
-        headers: { Authorization: authorization, "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      let response: Response;
+      try {
+        response = await fetchWithTimeout(
+          this.createTweetUrl,
+          {
+            method: "POST",
+            headers: { Authorization: authorization, "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+          X_REQUEST_TIMEOUT_MS,
+        );
+      } catch (error) {
+        throw new Error(`X post request failed: ${(error as Error).message}`);
+      }
 
       if (response.ok) return;
 
@@ -264,6 +315,14 @@ export class XClient {
         console.warn(`[x.sendPost] 429 rate-limited; sleeping ${Math.round(waitMs / 1000)}s before retry`);
         await sleep(waitMs);
         totalWaited += waitMs;
+        continue;
+      }
+
+      // If media attachment caused a 400, retry once text-only.
+      if (response.status === 400 && payload.media) {
+        const body = await response.text().catch(() => "");
+        console.warn(`[x.sendPost] 400 with media; retrying text-only — ${body.slice(0, 160)}`);
+        delete payload.media;
         continue;
       }
 

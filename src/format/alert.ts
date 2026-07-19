@@ -48,21 +48,23 @@ function renderStonkBrokerAlert(input: {
   lines.push(`${collection.displayName} #${event.tokenId} SOLD`);
 
   const symbol = (event.paymentSymbol ?? "ETH").replace(/^\$/, "");
-  const price =
-    event.priceEth === null || !Number.isFinite(event.priceEth)
-      ? "?"
-      : symbol === "STONKBROKER"
+  if (event.priceEth === null || !Number.isFinite(event.priceEth)) {
+    lines.push("price on OpenSea");
+  } else {
+    const price =
+      symbol === "STONKBROKER"
         ? Math.round(event.priceEth).toLocaleString("en-US")
         : formatEth(event.priceEth);
-  const unit = symbol === "ETH" ? "ETH" : `$${symbol}`;
-  const fee =
-    event.ethFee !== null &&
-    event.ethFee !== undefined &&
-    Number.isFinite(event.ethFee) &&
-    event.ethFee > 0
-      ? ` (+ ${formatEth(event.ethFee)} ETH fee)`
-      : "";
-  lines.push(`${price} ${unit}${fee}`);
+    const unit = symbol === "ETH" ? "ETH" : `$${symbol}`;
+    const fee =
+      event.ethFee !== null &&
+      event.ethFee !== undefined &&
+      Number.isFinite(event.ethFee) &&
+      event.ethFee > 0
+        ? ` (+ ${formatEth(event.ethFee)} ETH fee)`
+        : "";
+    lines.push(`${price} ${unit}${fee}`);
+  }
   lines.push(event.marketplace === "anvil" ? "Anvil AMM" : prettyMarketplace(event.marketplace));
   lines.push(`${shortenAddress(event.seller)} → ${shortenAddress(event.buyer)}`);
   if (event.assetUrl) lines.push(event.assetUrl);
