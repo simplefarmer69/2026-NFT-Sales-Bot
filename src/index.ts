@@ -39,7 +39,14 @@ function sortChronological(events: CanonicalSaleEvent[]): CanonicalSaleEvent[] {
   });
 }
 
+// Railway injects RAILWAY_GIT_COMMIT_SHA automatically. Logging it at boot
+// lets us confirm from the runtime logs alone which commit is actually live,
+// instead of guessing from the dashboard's "last deployed" timestamp.
+const BUILD_COMMIT = process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? "local";
+
 async function main(): Promise<void> {
+  console.log(`[boot] 2026-nft-sales-bot starting — commit=${BUILD_COMMIT} node=${process.version}`);
+
   const env = loadEnv();
 
   if (env.runMigrations) {
