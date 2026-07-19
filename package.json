@@ -1,6 +1,6 @@
 {
   "name": "nft-sales-bot",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Production-grade NFT sales tracker bot for X (Twitter). Posts every sale of your collection live, with image, marketplace, buyer/seller, and 24h floor change.",
   "license": "MIT",
   "type": "module",

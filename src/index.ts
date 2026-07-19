@@ -4,6 +4,7 @@ import { loadEnv } from "./config/env.js";
 import { AlertBotDb } from "./db.js";
 import { runMigrations } from "./db/migrate.js";
 import { renderSaleAlert } from "./format/alert.js";
+import { AnvilAmmBuysProvider } from "./providers/anvil-amm.js";
 import { OpenSeaEventsProvider } from "./providers/opensea.js";
 import type { CanonicalSaleEvent, TrackedCollection } from "./types.js";
 import { XClient } from "./x/client.js";
@@ -80,8 +81,13 @@ async function main(): Promise<void> {
     lookbackSeconds: env.openSeaPollLookbackSec,
   });
 
+  const anvil = new AnvilAmmBuysProvider({
+    lookbackSeconds: env.openSeaPollLookbackSec,
+  });
+
   const x = new XClient(env.xCredentials);
   console.log("[boot] X client ready (OAuth 1.0a)");
+  console.log("[boot] Anvil AMM Robinhood listener ready (Blockscout NFTBought)");
 
   let lastFloorPruneAt = 0;
   const FLOOR_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
@@ -130,11 +136,12 @@ async function main(): Promise<void> {
         lastFloorPruneAt = Date.now();
       }
 
-      // 2. Pull new sales.
-      const fetched = await withRetry("opensea.fetchLatestSales", () =>
-        opensea.fetchLatestSales(collections),
-      );
-      const ordered = sortChronological(fetched);
+      // 2. Pull new sales — OpenSea (ETH collections) + Anvil AMM (StonkBrokers on RH).
+      const [openSeaSales, anvilSales] = await Promise.all([
+        withRetry("opensea.fetchLatestSales", () => opensea.fetchLatestSales(collections)),
+        withRetry("anvil.fetchLatestBuys", () => anvil.fetchLatestBuys(collections)),
+      ]);
+      const ordered = sortChronological([...openSeaSales, ...anvilSales]);
 
       // 3. For each event: dedupe via the DB unique constraint, then post.
       for (const event of ordered) {

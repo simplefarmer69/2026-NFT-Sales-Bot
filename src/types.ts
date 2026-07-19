@@ -51,6 +51,10 @@ export type CanonicalSaleEvent = {
   seller: `0x${string}` | null;
   priceEth: number | null;
   priceUsd: number | null;
+  /** Payment unit for the priceEth field. Defaults to ETH when omitted. */
+  paymentSymbol?: string | null;
+  /** Optional secondary ETH fee (Anvil AMM surcharge). */
+  ethFee?: number | null;
   assetUrl: string | null;
   imageUrl: string | null;
   txUrl: string;
