@@ -14,9 +14,10 @@ export const STONKBROKER_FOOTER_TICKERS = [
   "HOOD",
 ] as const;
 
-/** Title-case a marketplace name like "opensea" → "Opensea", "blur" → "Blur". */
+/** Brand-correct marketplace name: "opensea" → "OpenSea", "blur" → "Blur". */
 function prettyMarketplace(raw: string | null | undefined): string {
   if (!raw) return "Unknown";
+  if (raw.toLowerCase() === "opensea") return "OpenSea";
   if (raw.length <= 1) return raw.toUpperCase();
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
@@ -43,12 +44,13 @@ function isStonkBroker(collection: TrackedCollection): boolean {
  *
  *   StonkBroker #4347 SOLD
  *   0.050 ETH
- *   Opensea on Robinhood Chain
+ *   OpenSea on Robinhood Chain
  *   0x1234…abcd → 0x5678…ef01
  *   {assetUrl}
  *   CLOCK IN https://www.stonkbrokers.cash/marketplace
  *   $Stonkbroker AAPL AMZN NVDA HOOD   (cashtag rotates per token id)
  *
+ * Price is ETH only (never USD); the line is omitted if unresolved.
  * Only ONE cashtag allowed — X 403s posts with multiple $SYMBOLs.
  */
 function renderStonkBrokerAlert(input: {
@@ -60,10 +62,11 @@ function renderStonkBrokerAlert(input: {
 
   lines.push(`${collection.displayName} #${event.tokenId} SOLD`);
 
+  // ETH price only — never USD. When the price can't be resolved on-chain,
+  // omit the line entirely rather than echo "price on OpenSea" (which put
+  // the word OpenSea in the tweet twice).
   const symbol = (event.paymentSymbol ?? "ETH").replace(/^\$/, "");
-  if (event.priceEth === null || !Number.isFinite(event.priceEth)) {
-    lines.push("price on OpenSea");
-  } else {
+  if (event.priceEth !== null && Number.isFinite(event.priceEth)) {
     const price =
       symbol === "STONKBROKER"
         ? Math.round(event.priceEth).toLocaleString("en-US")

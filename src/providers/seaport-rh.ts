@@ -80,6 +80,49 @@ type TxLogsResponse = {
   items?: { address?: { hash?: string } }[];
 };
 
+type TxDetailResponse = {
+  value?: string;
+};
+
+type TokenTransferItem = {
+  token?: { symbol?: string; type?: string };
+  total?: { value?: string; decimals?: string | number };
+};
+
+type TokenTransfersResponse = {
+  items?: TokenTransferItem[];
+};
+
+/** Native ETH wei → ETH number, or null if missing/zero. */
+function weiToEth(weiRaw: string | undefined | null): number | null {
+  if (!weiRaw) return null;
+  try {
+    const wei = BigInt(weiRaw);
+    if (wei <= 0n) return null;
+    return Number(wei) / 1e18;
+  } catch {
+    return null;
+  }
+}
+
+/** Sum WETH ERC-20 transfers in a tx (Seaport ERC20 consideration fills). */
+function sumWethTransfers(items: TokenTransferItem[]): number | null {
+  let total = 0n;
+  for (const item of items) {
+    const symbol = (item.token?.symbol ?? "").toUpperCase();
+    if (symbol !== "WETH" && symbol !== "WETH9") continue;
+    const raw = item.total?.value;
+    if (!raw) continue;
+    try {
+      total += BigInt(raw);
+    } catch {
+      // ignore malformed
+    }
+  }
+  if (total <= 0n) return null;
+  return Number(total) / 1e18;
+}
+
 /**
  * Poll Robinhood Blockscout for Seaport (OpenSea) NFT purchase transfers.
  *
@@ -94,6 +137,9 @@ export class SeaportRobinhoodProvider {
    * window would trigger a Blockscout logs fetch every few seconds.
    */
   private readonly seaportTouchCache = new Map<string, boolean>();
+
+  /** txHash → ETH sale price (native value, or summed WETH considerations). */
+  private readonly priceEthCache = new Map<string, number | null>();
 
   public constructor(private readonly config: { lookbackSeconds: number }) {}
 
@@ -123,6 +169,38 @@ export class SeaportRobinhoodProvider {
     if (this.seaportTouchCache.size > 5_000) this.seaportTouchCache.clear();
     this.seaportTouchCache.set(txHash, touches);
     return touches;
+  }
+
+  /**
+   * Resolve the ETH sale price for a Seaport fill:
+   *   1. Native tx value (ETH buys via routers / fulfillBasicOrder)
+   *   2. Else sum of WETH ERC-20 transfers in the receipt (ERC20 consideration)
+   */
+  private async resolvePriceEth(txHash: string): Promise<number | null> {
+    if (this.priceEthCache.has(txHash)) return this.priceEthCache.get(txHash) ?? null;
+
+    let price: number | null = null;
+    try {
+      const tx = await fetchJson<TxDetailResponse>(
+        `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}`,
+      );
+      price = weiToEth(tx.value);
+      if (price === null) {
+        const transfers = await fetchJson<TokenTransfersResponse>(
+          `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}/token-transfers`,
+        );
+        price = sumWethTransfers(transfers.items ?? []);
+      }
+    } catch (error) {
+      console.warn(
+        `[seaport-rh] price fetch failed for ${txHash.slice(0, 12)}… — ${(error as Error).message}`,
+      );
+      return null;
+    }
+
+    if (this.priceEthCache.size > 5_000) this.priceEthCache.clear();
+    this.priceEthCache.set(txHash, price);
+    return price;
   }
 
   public async fetchLatestSales(collections: TrackedCollection[]): Promise<CanonicalSaleEvent[]> {
@@ -184,6 +262,7 @@ export class SeaportRobinhoodProvider {
 
             const buyer = row.to?.toLowerCase();
             const seller = row.from?.toLowerCase();
+            const priceEth = await this.resolvePriceEth(txHash);
             matched += 1;
 
             events.push({
@@ -198,8 +277,9 @@ export class SeaportRobinhoodProvider {
               marketplace: "opensea",
               buyer: buyer && /^0x[a-f0-9]{40}$/.test(buyer) ? (buyer as `0x${string}`) : null,
               seller: seller && /^0x[a-f0-9]{40}$/.test(seller) ? (seller as `0x${string}`) : null,
-              priceEth: null,
+              priceEth,
               priceUsd: null,
+              paymentSymbol: "ETH",
               assetUrl: `https://opensea.io/assets/robinhood/${collection.contract}/${tokenId}`,
               imageUrl: null,
               txUrl: `https://robinhoodchain.blockscout.com/tx/${txHash}`,
