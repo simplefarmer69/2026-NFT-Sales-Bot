@@ -63,6 +63,36 @@ export class AlertBotDb {
   }
 
   /**
+   * One-shot: release Seaport-RH rows for retry after they were marked done
+   * by the 401/403 give-up path without a tweet actually landing. Only rows
+   * still inside the provider lookback window become candidates again.
+   */
+  public async unstickSeaportRhV2(): Promise<number> {
+    const gate = await this.pool.query<{ value: string }>(
+      `SELECT value FROM bot_meta WHERE key = 'seaport_unstick_v2'`,
+    );
+    if (gate.rows[0]?.value === "done") return 0;
+
+    const released = await this.pool.query(
+      `
+      UPDATE nft_sale_alert_events
+      SET posted = false
+      WHERE event_id LIKE '%:seaport-rh:%'
+        AND event_timestamp > NOW() - INTERVAL '6 hours'
+      `,
+    );
+
+    await this.pool.query(
+      `
+      INSERT INTO bot_meta (key, value, updated_at) VALUES ('seaport_unstick_v2', 'done', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = 'done', updated_at = NOW()
+      `,
+    );
+
+    return released.rowCount ?? 0;
+  }
+
+  /**
    * Claim a sale for posting.
    *   - `claim`  — new row or prior failed attempt (posted=false); caller should post
    *   - `done`   — already tweeted successfully; skip

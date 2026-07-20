@@ -98,6 +98,10 @@ async function main(): Promise<void> {
   if (unstuck > 0) {
     console.log(`[boot] unstuck ${unstuck} Seaport-RH sale(s) for retry (mark-before-post bug)`);
   }
+  const unstuckV2 = await db.unstickSeaportRhV2();
+  if (unstuckV2 > 0) {
+    console.log(`[boot] unstuck ${unstuckV2} Seaport-RH sale(s) for retry (403 give-up without tweet)`);
+  }
 
   const opensea = new OpenSeaEventsProvider({
     baseUrl: env.openSeaBaseUrl,
@@ -119,6 +123,13 @@ async function main(): Promise<void> {
 
   let lastFloorPruneAt = 0;
   const FLOOR_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+
+  // Per-event post failure tracking. 403s are retried (could be transient
+  // spam heuristics) with a 60s backoff, capped so a hard rejection can't
+  // loop forever.
+  const postFailures = new Map<string, { count: number; lastAt: number }>();
+  const MAX_POST_ATTEMPTS = 5;
+  const POST_RETRY_BACKOFF_MS = 60_000;
 
   console.log(`[loop] polling every ${env.pollMs}ms`);
   // Main loop: poll OpenSea, dedupe, post to X. If anything throws, the
@@ -190,6 +201,12 @@ async function main(): Promise<void> {
           continue;
         }
 
+        // Back off between retry attempts for previously failed posts.
+        const prevFailure = postFailures.get(event.eventId);
+        if (prevFailure && Date.now() - prevFailure.lastAt < POST_RETRY_BACKOFF_MS) {
+          continue;
+        }
+
         const claim = await db.claimSaleEvent(event);
         if (claim === "done") {
           skippedDedupe += 1;
@@ -212,26 +229,25 @@ async function main(): Promise<void> {
         try {
           await x.sendPost(text, enrichedEvent.imageUrl);
           await db.markSalePosted(event);
+          postFailures.delete(event.eventId);
           posted += 1;
           console.log(
             `[post] ok slug=${event.collectionSlug} token=${event.tokenId} priceEth=${event.priceEth ?? "?"}`,
           );
         } catch (error) {
           const message = (error as Error).message;
+          const fails = (postFailures.get(event.eventId)?.count ?? 0) + 1;
+          postFailures.set(event.eventId, { count: fails, lastAt: Date.now() });
           console.warn(
-            `[post] FAILED slug=${event.collectionSlug} token=${event.tokenId} — ${message}`,
+            `[post] FAILED (attempt ${fails}/${MAX_POST_ATTEMPTS}) slug=${event.collectionSlug} token=${event.tokenId} — ${message}`,
           );
-          // Leave posted=false so the next cycle retries. Permanent auth
-          // failures: mark done to avoid an infinite fail loop.
-          if (message.includes("401") || message.includes("403")) {
+          // Leave posted=false so the next cycle retries. Only give up after
+          // repeated hard failures — a single 403 can be a transient spam
+          // heuristic, and marking done on it silently eats the tweet.
+          if (fails >= MAX_POST_ATTEMPTS && !isTransientPostFailure(message)) {
             await db.markSalePosted(event);
             console.warn(
-              `[post] marked done (auth failure) slug=${event.collectionSlug} token=${event.tokenId}`,
-            );
-          } else if (!isTransientPostFailure(message)) {
-            // Unknown non-transient: still retry a few times via posted=false.
-            console.warn(
-              `[post] will retry slug=${event.collectionSlug} token=${event.tokenId}`,
+              `[post] giving up after ${fails} attempts slug=${event.collectionSlug} token=${event.tokenId}`,
             );
           }
         }
