@@ -3,6 +3,7 @@ export type AppEnv = {
   openSeaApiKey: string;
   openSeaBaseUrl: string;
   openSeaPollLookbackSec: number;
+  seaportRhLookbackSec: number;
   xCredentials: {
     apiKey: string;
     apiSecret: string;
