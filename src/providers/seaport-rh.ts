@@ -110,6 +110,9 @@ export class SeaportRobinhoodProvider {
       touches = (logs.items ?? []).some(
         (item) => item.address?.hash?.toLowerCase() === SEAPORT_ADDRESS,
       );
+      if (touches) {
+        console.log(`[seaport-rh] router fill detected tx=${txHash.slice(0, 12)}…`);
+      }
     } catch (error) {
       // Don't cache on fetch failure — retry next cycle.
       console.warn(`[seaport-rh] logs fetch failed for ${txHash.slice(0, 12)}… — ${(error as Error).message}`);
@@ -177,9 +180,6 @@ export class SeaportRobinhoodProvider {
             if (!SEAPORT_METHODS.has(fn)) {
               if (KNOWN_NON_SEAPORT_METHODS.has(fn)) continue;
               if (!(await this.txTouchesSeaport(txHash))) continue;
-              console.log(
-                `[seaport-rh] router fill detected method=${fn || "?"} token=${tokenId} tx=${txHash.slice(0, 12)}…`,
-              );
             }
 
             const buyer = row.to?.toLowerCase();
