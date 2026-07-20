@@ -43,7 +43,7 @@ function isStonkBroker(collection: TrackedCollection): boolean {
  *
  *   StonkBroker #4347 SOLD
  *   0.050 ETH
- *   Opensea
+ *   Opensea on Robinhood Chain
  *   0x1234…abcd → 0x5678…ef01
  *   {assetUrl}
  *   CLOCK IN https://www.stonkbrokers.cash/marketplace
@@ -78,7 +78,8 @@ function renderStonkBrokerAlert(input: {
         : "";
     lines.push(`${price} ${unit}${fee}`);
   }
-  lines.push(event.marketplace === "anvil" ? "Anvil AMM" : prettyMarketplace(event.marketplace));
+  const venue = event.marketplace === "anvil" ? "Anvil AMM" : prettyMarketplace(event.marketplace);
+  lines.push(`${venue} on Robinhood Chain`);
   lines.push(`${shortenAddress(event.seller)} → ${shortenAddress(event.buyer)}`);
   if (event.assetUrl) lines.push(event.assetUrl);
 
