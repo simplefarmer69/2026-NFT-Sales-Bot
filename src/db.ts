@@ -68,8 +68,10 @@ export class AlertBotDb {
    * still inside the provider lookback window become candidates again.
    */
   public async unstickSeaportRhV2(): Promise<number> {
+    // v3: v2 released the rows but posts still 403'd on the multi-cashtag
+    // footer and were re-marked done. Re-release now that the footer is fixed.
     const gate = await this.pool.query<{ value: string }>(
-      `SELECT value FROM bot_meta WHERE key = 'seaport_unstick_v2'`,
+      `SELECT value FROM bot_meta WHERE key = 'seaport_unstick_v3'`,
     );
     if (gate.rows[0]?.value === "done") return 0;
 
@@ -84,7 +86,7 @@ export class AlertBotDb {
 
     await this.pool.query(
       `
-      INSERT INTO bot_meta (key, value, updated_at) VALUES ('seaport_unstick_v2', 'done', NOW())
+      INSERT INTO bot_meta (key, value, updated_at) VALUES ('seaport_unstick_v3', 'done', NOW())
       ON CONFLICT (key) DO UPDATE SET value = 'done', updated_at = NOW()
       `,
     );

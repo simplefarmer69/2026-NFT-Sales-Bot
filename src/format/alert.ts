@@ -1,7 +1,18 @@
 import type { CanonicalSaleEvent, TrackedCollection } from "../types.js";
 
-/** Live StonkBrokers mainnet stock-token tickers (Robinhood Chain deploy). */
-export const STONKBROKER_STOCK_TICKERS = ["AAPL", "AMZN", "NVDA"] as const;
+/**
+ * Footer tickers: the Stonkbroker token, the three live mainnet stock tokens,
+ * and Robinhood's own ticker. X allows only ONE cashtag per post, so each
+ * tweet cashtags exactly one of these (rotating by token id) and renders the
+ * rest as plain text.
+ */
+export const STONKBROKER_FOOTER_TICKERS = [
+  "Stonkbroker",
+  "AAPL",
+  "AMZN",
+  "NVDA",
+  "HOOD",
+] as const;
 
 /** Title-case a marketplace name like "opensea" → "Opensea", "blur" → "Blur". */
 function prettyMarketplace(raw: string | null | undefined): string {
@@ -36,7 +47,9 @@ function isStonkBroker(collection: TrackedCollection): boolean {
  *   0x1234…abcd → 0x5678…ef01
  *   {assetUrl}
  *   CLOCK IN https://www.stonkbrokers.cash/marketplace
- *   $Stonkbroker $AAPL $AMZN $NVDA
+ *   $Stonkbroker AAPL AMZN NVDA HOOD   (cashtag rotates per token id)
+ *
+ * Only ONE cashtag allowed — X 403s posts with multiple $SYMBOLs.
  */
 function renderStonkBrokerAlert(input: {
   event: CanonicalSaleEvent;
@@ -73,10 +86,16 @@ function renderStonkBrokerAlert(input: {
   const cta = collection.communityCallToAction.replace(/(?:➡️|→|➜|👉)\s*$/u, "").trim() || "CLOCK IN";
   lines.push(`${cta} ${collection.communityUrl}`);
 
-  const tickers = [
-    "$Stonkbroker",
-    ...STONKBROKER_STOCK_TICKERS.map((t) => `$${t}`),
-  ];
+  // X hard-rejects posts with more than one cashtag (403 "limited to a
+  // maximum of one cashtag"). Rotate which ticker gets the cashtag, keyed by
+  // token id so retries of the same sale render identically.
+  const tokenNum = Number.parseInt(event.tokenId, 10);
+  const cashtagIndex = Number.isFinite(tokenNum)
+    ? Math.abs(tokenNum) % STONKBROKER_FOOTER_TICKERS.length
+    : 0;
+  const tickers = STONKBROKER_FOOTER_TICKERS.map((ticker, i) =>
+    i === cashtagIndex ? `$${ticker}` : ticker,
+  );
   lines.push(tickers.join(" "));
 
   return lines.join("\n");
