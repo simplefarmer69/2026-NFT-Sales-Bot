@@ -102,6 +102,10 @@ async function main(): Promise<void> {
   if (unstuckV2 > 0) {
     console.log(`[boot] unstuck ${unstuckV2} Seaport-RH sale(s) for retry (403 give-up without tweet)`);
   }
+  const reposted = await db.repostLatestSaleOnce();
+  if (reposted > 0) {
+    console.log(`[boot] released token 2439 for repost in the new tweet format`);
+  }
 
   const opensea = new OpenSeaEventsProvider({
     baseUrl: env.openSeaBaseUrl,

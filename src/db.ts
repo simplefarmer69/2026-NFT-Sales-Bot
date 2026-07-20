@@ -95,6 +95,35 @@ export class AlertBotDb {
   }
 
   /**
+   * One-shot: repost the most recent Seaport-RH sale (token 2439, tweeted in
+   * the old format before ETH price / venue-line cleanup shipped).
+   */
+  public async repostLatestSaleOnce(): Promise<number> {
+    const gate = await this.pool.query<{ value: string }>(
+      `SELECT value FROM bot_meta WHERE key = 'seaport_repost_2439'`,
+    );
+    if (gate.rows[0]?.value === "done") return 0;
+
+    const released = await this.pool.query(
+      `
+      UPDATE nft_sale_alert_events
+      SET posted = false
+      WHERE tx_hash = '0x9d3cdf09107eeac41510eafb83b979c2ee9f3a5caeac3c84bbb0cf116ce4d2c3'
+        AND event_id LIKE '%:seaport-rh:%'
+      `,
+    );
+
+    await this.pool.query(
+      `
+      INSERT INTO bot_meta (key, value, updated_at) VALUES ('seaport_repost_2439', 'done', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = 'done', updated_at = NOW()
+      `,
+    );
+
+    return released.rowCount ?? 0;
+  }
+
+  /**
    * Claim a sale for posting.
    *   - `claim`  — new row or prior failed attempt (posted=false); caller should post
    *   - `done`   — already tweeted successfully; skip
