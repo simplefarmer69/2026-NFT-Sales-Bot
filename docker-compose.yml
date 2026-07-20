@@ -25,7 +25,8 @@ services:
       X_ACCESS_TOKEN_SECRET: ${X_ACCESS_TOKEN_SECRET}
       COLLECTIONS_PATH: /app/collections.json
       ALERT_POLL_MS: ${ALERT_POLL_MS:-4000}
-      OPENSEA_POLL_LOOKBACK_SEC: ${OPENSEA_POLL_LOOKBACK_SEC:-900}
+      OPENSEA_POLL_LOOKBACK_SEC: ${OPENSEA_POLL_LOOKBACK_SEC:-1800}
+      SEAPORT_RH_LOOKBACK_SEC: ${SEAPORT_RH_LOOKBACK_SEC:-3600}
     volumes:
       - ./collections.json:/app/collections.json:ro
 

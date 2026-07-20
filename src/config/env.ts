@@ -69,9 +69,12 @@ export function loadEnv(): AppEnv {
     databaseUrl: requireString("DATABASE_URL"),
     openSeaApiKey: requireString("OPENSEA_API_KEY"),
     openSeaBaseUrl: process.env.OPENSEA_BASE_URL ?? "https://api.opensea.io",
-    // 30m default — StonkBrokers AMM traffic is dense; a short window + thin
-    // Blockscout page used to skip OpenSea/Seaport fills buried under sells.
+    // OpenSea HTTP API lookback (Pixel Pups / Pup Cup).
     openSeaPollLookbackSec: parsePositiveNumber("OPENSEA_POLL_LOOKBACK_SEC", 1800),
+    // Seaport-on-RH lookback — StonkBrokers OpenSea fills are sparse vs AMM
+    // traffic. Railway often pins OPENSEA_POLL_LOOKBACK_SEC=900 (15m), which
+    // drops marketplace sales that land outside that window. Keep this wider.
+    seaportRhLookbackSec: parsePositiveNumber("SEAPORT_RH_LOOKBACK_SEC", 3600),
     xCredentials,
     collectionsPath,
     collectionsJson,

@@ -108,12 +108,14 @@ async function main(): Promise<void> {
   // Blockscout Seaport watcher — OpenSea fills on Robinhood even if the
   // OpenSea events API returns empty / rate-limits the key.
   const seaportRh = new SeaportRobinhoodProvider({
-    lookbackSeconds: env.openSeaPollLookbackSec,
+    lookbackSeconds: env.seaportRhLookbackSec,
   });
 
   const x = new XClient(env.xCredentials);
   console.log("[boot] X client ready (OAuth 1.0a)");
-  console.log("[boot] sources: OpenSea API + Robinhood Seaport (Blockscout); Anvil AMM off");
+  console.log(
+    `[boot] sources: OpenSea API (lookback=${env.openSeaPollLookbackSec}s) + Robinhood Seaport (lookback=${env.seaportRhLookbackSec}s); Anvil AMM off`,
+  );
 
   let lastFloorPruneAt = 0;
   const FLOOR_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
