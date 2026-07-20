@@ -106,6 +106,10 @@ async function main(): Promise<void> {
   if (reposted > 0) {
     console.log(`[boot] released token 2439 for repost in the new tweet format`);
   }
+  const reposted3183 = await db.repostSale3183Once();
+  if (reposted3183 > 0) {
+    console.log(`[boot] released token 3183 for repost with corrected 1.050 ETH price`);
+  }
 
   const opensea = new OpenSeaEventsProvider({
     baseUrl: env.openSeaBaseUrl,

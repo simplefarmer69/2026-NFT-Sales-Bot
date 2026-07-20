@@ -76,21 +76,25 @@ function methodName(raw: string | undefined): string {
   return raw.split("(")[0]!.trim();
 }
 
+type DecodedParam = {
+  name?: string;
+  value?: unknown;
+};
+
+type TxLogItem = {
+  address?: { hash?: string };
+  decoded?: {
+    method_call?: string;
+    parameters?: DecodedParam[];
+  };
+};
+
 type TxLogsResponse = {
-  items?: { address?: { hash?: string } }[];
+  items?: TxLogItem[];
 };
 
 type TxDetailResponse = {
   value?: string;
-};
-
-type TokenTransferItem = {
-  token?: { symbol?: string; type?: string };
-  total?: { value?: string; decimals?: string | number };
-};
-
-type TokenTransfersResponse = {
-  items?: TokenTransferItem[];
 };
 
 /** Native ETH wei → ETH number, or null if missing/zero. */
@@ -105,22 +109,62 @@ function weiToEth(weiRaw: string | undefined | null): number | null {
   }
 }
 
-/** Sum WETH ERC-20 transfers in a tx (Seaport ERC20 consideration fills). */
-function sumWethTransfers(items: TokenTransferItem[]): number | null {
-  let total = 0n;
-  for (const item of items) {
-    const symbol = (item.token?.symbol ?? "").toUpperCase();
-    if (symbol !== "WETH" && symbol !== "WETH9") continue;
-    const raw = item.total?.value;
-    if (!raw) continue;
-    try {
-      total += BigInt(raw);
-    } catch {
-      // ignore malformed
+/**
+ * Sum payment considerations from Seaport OrderFulfilled logs.
+ *
+ * itemType 0 = native ETH, 1 = ERC20 (WETH). NFT items (2/3) are ignored.
+ * Prefer this over summing ERC-20 Transfer events — router hops (buyer→router
+ * →Seaport) double-count the same WETH and inflate the tweeted price 2×.
+ */
+function priceFromOrderFulfilled(logs: TxLogItem[], tokenId: string): number | null {
+  let totalWei = 0n;
+  let matchedOffer = false;
+
+  for (const item of logs) {
+    if (item.address?.hash?.toLowerCase() !== SEAPORT_ADDRESS) continue;
+    const method = item.decoded?.method_call ?? "";
+    if (!method.startsWith("OrderFulfilled")) continue;
+
+    const params = item.decoded?.parameters ?? [];
+    const offer = params.find((p) => p.name === "offer")?.value;
+    const consideration = params.find((p) => p.name === "consideration")?.value;
+    if (!Array.isArray(consideration)) continue;
+
+    // Only count fills that include this NFT in the offer (or, for some
+    // match* flows, in consideration). Prevents multi-NFT txs mixing prices.
+    const offersNft =
+      Array.isArray(offer) &&
+      offer.some(
+        (row) =>
+          Array.isArray(row) &&
+          String(row[0]) === "2" &&
+          String(row[2]) === tokenId,
+      );
+    const considersNft = consideration.some(
+      (row) =>
+        Array.isArray(row) &&
+        String(row[0]) === "2" &&
+        String(row[2]) === tokenId,
+    );
+    if (!offersNft && !considersNft) continue;
+    matchedOffer = true;
+
+    for (const row of consideration) {
+      if (!Array.isArray(row) || row.length < 4) continue;
+      const itemType = String(row[0]);
+      // 0 = ETH, 1 = ERC20. Skip NFTs / criteria.
+      if (itemType !== "0" && itemType !== "1") continue;
+      try {
+        const amount = BigInt(String(row[3]));
+        if (amount > 0n) totalWei += amount;
+      } catch {
+        // ignore malformed
+      }
     }
   }
-  if (total <= 0n) return null;
-  return Number(total) / 1e18;
+
+  if (!matchedOffer || totalWei <= 0n) return null;
+  return Number(totalWei) / 1e18;
 }
 
 /**
@@ -138,7 +182,7 @@ export class SeaportRobinhoodProvider {
    */
   private readonly seaportTouchCache = new Map<string, boolean>();
 
-  /** txHash → ETH sale price (native value, or summed WETH considerations). */
+  /** Cache key `${txHash}:${tokenId}` → ETH sale price. */
   private readonly priceEthCache = new Map<string, number | null>();
 
   public constructor(private readonly config: { lookbackSeconds: number }) {}
@@ -173,23 +217,28 @@ export class SeaportRobinhoodProvider {
 
   /**
    * Resolve the ETH sale price for a Seaport fill:
-   *   1. Native tx value (ETH buys via routers / fulfillBasicOrder)
-   *   2. Else sum of WETH ERC-20 transfers in the receipt (ERC20 consideration)
+   *   1. Sum OrderFulfilled payment considerations (ETH/WETH) for this token
+   *   2. Fallback: native tx value (simple ETH buys)
+   *
+   * Never sum raw WETH Transfer events — router wraps (buyer→router→Seaport)
+   * emit the same amount twice and inflate the price 2×.
    */
-  private async resolvePriceEth(txHash: string): Promise<number | null> {
-    if (this.priceEthCache.has(txHash)) return this.priceEthCache.get(txHash) ?? null;
+  private async resolvePriceEth(txHash: string, tokenId: string): Promise<number | null> {
+    const cacheKey = `${txHash}:${tokenId}`;
+    if (this.priceEthCache.has(cacheKey)) return this.priceEthCache.get(cacheKey) ?? null;
 
     let price: number | null = null;
     try {
-      const tx = await fetchJson<TxDetailResponse>(
-        `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}`,
+      const logs = await fetchJson<TxLogsResponse>(
+        `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}/logs`,
       );
-      price = weiToEth(tx.value);
+      price = priceFromOrderFulfilled(logs.items ?? [], tokenId);
+
       if (price === null) {
-        const transfers = await fetchJson<TokenTransfersResponse>(
-          `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}/token-transfers`,
+        const tx = await fetchJson<TxDetailResponse>(
+          `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}`,
         );
-        price = sumWethTransfers(transfers.items ?? []);
+        price = weiToEth(tx.value);
       }
     } catch (error) {
       console.warn(
@@ -199,7 +248,7 @@ export class SeaportRobinhoodProvider {
     }
 
     if (this.priceEthCache.size > 5_000) this.priceEthCache.clear();
-    this.priceEthCache.set(txHash, price);
+    this.priceEthCache.set(cacheKey, price);
     return price;
   }
 
@@ -262,7 +311,7 @@ export class SeaportRobinhoodProvider {
 
             const buyer = row.to?.toLowerCase();
             const seller = row.from?.toLowerCase();
-            const priceEth = await this.resolvePriceEth(txHash);
+            const priceEth = await this.resolvePriceEth(txHash, String(tokenId));
             matched += 1;
 
             events.push({

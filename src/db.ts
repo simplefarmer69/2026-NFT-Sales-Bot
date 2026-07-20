@@ -124,6 +124,35 @@ export class AlertBotDb {
   }
 
   /**
+   * One-shot: repost token 3183 after the WETH double-count price bug
+   * tweeted 2.100 ETH instead of the real 1.050 ETH sale price.
+   */
+  public async repostSale3183Once(): Promise<number> {
+    const gate = await this.pool.query<{ value: string }>(
+      `SELECT value FROM bot_meta WHERE key = 'seaport_repost_3183'`,
+    );
+    if (gate.rows[0]?.value === "done") return 0;
+
+    const released = await this.pool.query(
+      `
+      UPDATE nft_sale_alert_events
+      SET posted = false
+      WHERE tx_hash = '0x8a56f5e95e62c6ffd86cdabadf7b8a58017de20fd91e03bb58af950bdf3f0fd0'
+        AND event_id LIKE '%:seaport-rh:%'
+      `,
+    );
+
+    await this.pool.query(
+      `
+      INSERT INTO bot_meta (key, value, updated_at) VALUES ('seaport_repost_3183', 'done', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = 'done', updated_at = NOW()
+      `,
+    );
+
+    return released.rowCount ?? 0;
+  }
+
+  /**
    * Claim a sale for posting.
    *   - `claim`  — new row or prior failed attempt (posted=false); caller should post
    *   - `done`   — already tweeted successfully; skip
