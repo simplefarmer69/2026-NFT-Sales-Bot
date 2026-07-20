@@ -15,6 +15,26 @@ const SEAPORT_METHODS = new Set([
   "matchOrders",
 ]);
 
+/**
+ * Methods that are definitively NOT OpenSea fills (Anvil AMM + vanilla
+ * transfers/mints). Anything else — e.g. RelayRouterV3 `multicall`, sweep
+ * tools, aggregators — gets a receipt-log check for the Seaport contract,
+ * because routers wrap Seaport fills under their own method names.
+ */
+const KNOWN_NON_SEAPORT_METHODS = new Set([
+  "sellNFT",
+  "buyNFT",
+  "buyRandomNFT",
+  "transfer",
+  "transferFrom",
+  "safeTransferFrom",
+  "mint",
+  "safeMint",
+]);
+
+/** Seaport 1.6 on Robinhood Chain — emits OrderFulfilled on every OpenSea fill. */
+const SEAPORT_ADDRESS = "0x0000000000000068f116a894984e2db1123eb395";
+
 const BLOCKSCOUT_BASE = "https://robinhoodchain.blockscout.com";
 const FETCH_TIMEOUT_MS = 20_000;
 const PAGE_SIZE = 100;
@@ -56,6 +76,10 @@ function methodName(raw: string | undefined): string {
   return raw.split("(")[0]!.trim();
 }
 
+type TxLogsResponse = {
+  items?: { address?: { hash?: string } }[];
+};
+
 /**
  * Poll Robinhood Blockscout for Seaport (OpenSea) NFT purchase transfers.
  *
@@ -64,7 +88,39 @@ function methodName(raw: string | undefined): string {
  * page of 50 often contains zero Seaport fills even when OpenSea sales exist.
  */
 export class SeaportRobinhoodProvider {
+  /**
+   * txHash → "did the receipt touch Seaport?". The lookback window is
+   * re-scanned every poll cycle, so without this cache every router tx in the
+   * window would trigger a Blockscout logs fetch every few seconds.
+   */
+  private readonly seaportTouchCache = new Map<string, boolean>();
+
   public constructor(private readonly config: { lookbackSeconds: number }) {}
+
+  /** True when the tx receipt contains any log emitted by the Seaport contract. */
+  private async txTouchesSeaport(txHash: string): Promise<boolean> {
+    const cached = this.seaportTouchCache.get(txHash);
+    if (cached !== undefined) return cached;
+
+    let touches = false;
+    try {
+      const logs = await fetchJson<TxLogsResponse>(
+        `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}/logs`,
+      );
+      touches = (logs.items ?? []).some(
+        (item) => item.address?.hash?.toLowerCase() === SEAPORT_ADDRESS,
+      );
+    } catch (error) {
+      // Don't cache on fetch failure — retry next cycle.
+      console.warn(`[seaport-rh] logs fetch failed for ${txHash.slice(0, 12)}… — ${(error as Error).message}`);
+      return false;
+    }
+
+    // Bounded cache: entries only matter within the lookback window.
+    if (this.seaportTouchCache.size > 5_000) this.seaportTouchCache.clear();
+    this.seaportTouchCache.set(txHash, touches);
+    return touches;
+  }
 
   public async fetchLatestSales(collections: TrackedCollection[]): Promise<CanonicalSaleEvent[]> {
     const targets = collections.filter(
@@ -110,12 +166,21 @@ export class SeaportRobinhoodProvider {
             }
             scanned += 1;
 
-            const fn = methodName(row.functionName);
-            if (!SEAPORT_METHODS.has(fn)) continue;
-
             const txHash = row.hash?.toLowerCase();
             const tokenId = row.tokenID;
             if (!txHash || !/^0x[a-f0-9]{64}$/.test(txHash) || !tokenId) continue;
+
+            // Direct Seaport call → match. Known AMM/transfer method → skip.
+            // Anything else (router multicalls, aggregators) → check the
+            // receipt for a Seaport-emitted log before deciding.
+            const fn = methodName(row.functionName);
+            if (!SEAPORT_METHODS.has(fn)) {
+              if (KNOWN_NON_SEAPORT_METHODS.has(fn)) continue;
+              if (!(await this.txTouchesSeaport(txHash))) continue;
+              console.log(
+                `[seaport-rh] router fill detected method=${fn || "?"} token=${tokenId} tx=${txHash.slice(0, 12)}…`,
+              );
+            }
 
             const buyer = row.to?.toLowerCase();
             const seller = row.from?.toLowerCase();
