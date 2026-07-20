@@ -73,8 +73,10 @@ export function loadEnv(): AppEnv {
     openSeaPollLookbackSec: parsePositiveNumber("OPENSEA_POLL_LOOKBACK_SEC", 1800),
     // Seaport-on-RH lookback — StonkBrokers OpenSea fills are sparse vs AMM
     // traffic. Railway often pins OPENSEA_POLL_LOOKBACK_SEC=900 (15m), which
-    // drops marketplace sales that land outside that window. Keep this wider.
-    seaportRhLookbackSec: parsePositiveNumber("SEAPORT_RH_LOOKBACK_SEC", 3600),
+    // drops marketplace sales that land outside that window. 4h default so a
+    // redeploy also back-fills sales missed while the old window was live;
+    // DB dedupe (posted=true) prevents double tweets.
+    seaportRhLookbackSec: parsePositiveNumber("SEAPORT_RH_LOOKBACK_SEC", 14_400),
     xCredentials,
     collectionsPath,
     collectionsJson,
