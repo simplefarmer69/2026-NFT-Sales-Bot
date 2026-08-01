@@ -1,255 +1,239 @@
 import type { CanonicalSaleEvent, TrackedCollection } from "../types.js";
 
 /**
- * OpenSea Seaport fills on Robinhood Chain show up in Blockscout NFT transfers
- * with these method names. Primary detector for StonkBrokers OpenSea buys —
- * the collection's AMM sell/transfer traffic drowns a single-page scan.
+ * OpenSea (Seaport) fill watcher for StonkBrokers on Robinhood Chain.
+ *
+ * Reads the chain directly over JSON-RPC. Two `eth_getLogs` calls per cycle —
+ * the collection's ERC-721 Transfers and Seaport's OrderFulfilled events over
+ * the same block range — are correlated by transaction hash. A collection
+ * transfer whose tx also emitted OrderFulfilled is an OpenSea sale; everything
+ * else (Anvil AMM trades, plain transfers, mints) is ignored.
+ *
+ * This replaced a Blockscout REST scan that re-paged up to 1,500 NFT-transfer
+ * rows every 4s poll and then fetched per-tx logs for pricing. That volume
+ * rate-limited us into a permanent HTTP 429, and because the scan fails closed,
+ * StonkBroker sales stopped posting entirely while the OpenSea-API collections
+ * (Pixel Pups, Pup Cup) kept working — nine real sales were dropped on
+ * 2026-08-01 alone. See also the project rule: never trust Blockscout's logs
+ * API for cursor-advancing scans.
  */
-const SEAPORT_METHODS = new Set([
-  "fulfillAvailableAdvancedOrders",
-  "fulfillAdvancedOrder",
-  "fulfillBasicOrder",
-  "fulfillBasicOrder_efficient_6GL6yc",
-  "fulfillOrder",
-  "matchAdvancedOrders",
-  "matchOrders",
-]);
 
-/**
- * Methods that are definitively NOT OpenSea fills (Anvil AMM + vanilla
- * transfers/mints). Anything else — e.g. RelayRouterV3 `multicall`, sweep
- * tools, aggregators — gets a receipt-log check for the Seaport contract,
- * because routers wrap Seaport fills under their own method names.
- */
-const KNOWN_NON_SEAPORT_METHODS = new Set([
-  "sellNFT",
-  "buyNFT",
-  "buyRandomNFT",
-  "transfer",
-  "transferFrom",
-  "safeTransferFrom",
-  "mint",
-  "safeMint",
-]);
+const RPC_URL = process.env.ROBINHOOD_RPC_URL ?? "https://rpc.mainnet.chain.robinhood.com";
 
 /** Seaport 1.6 on Robinhood Chain — emits OrderFulfilled on every OpenSea fill. */
 const SEAPORT_ADDRESS = "0x0000000000000068f116a894984e2db1123eb395";
 
-const BLOCKSCOUT_BASE = "https://robinhoodchain.blockscout.com";
-const FETCH_TIMEOUT_MS = 20_000;
-const PAGE_SIZE = 100;
-const MAX_PAGES = 15;
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+/**
+ * OrderFulfilled(bytes32,address,address,address,(uint8,address,uint256,uint256)[],
+ * (uint8,address,uint256,uint256,address)[])
+ */
+const ORDER_FULFILLED_TOPIC = "0x9d9af8e38d66c62e2c12f0225249fd9d721c54b83f48d9352c97c6cacdcb6f31";
 
-type TokenNftTx = {
-  hash?: string;
-  tokenID?: string;
-  from?: string;
-  to?: string;
-  timeStamp?: string;
-  blockNumber?: string;
-  functionName?: string;
-  contractAddress?: string;
+const FETCH_TIMEOUT_MS = 20_000;
+/** Robinhood Chain runs ~10 blocks/sec (≈0.1s block time), measured 2026-08-01. */
+const BLOCKS_PER_SECOND = 10;
+/**
+ * `eth_getLogs` span per request. The public node happily serves 900k-block
+ * ranges, so the default 4h lookback is one or two calls; what it does rate
+ * limit is a burst of parallel requests. Keep the chunk large and the calls
+ * few rather than fanning out.
+ */
+const LOG_CHUNK_BLOCKS = 100_000;
+const RPC_MAX_ATTEMPTS = 4;
+/**
+ * Ceiling on a single cycle's scan. A cold start covers the full lookback
+ * (4h ≈ 144k blocks) in one pass; after a longer outage the cursor catches up
+ * over successive cycles instead of issuing one enormous range query.
+ */
+const MAX_BLOCKS_PER_CYCLE = 200_000;
+/** Re-scan a little history each cycle so a reorg can't drop a sale. */
+const CURSOR_OVERLAP_BLOCKS = 50;
+
+type RpcLog = {
+  address: string;
+  topics: string[];
+  data: string;
+  blockNumber: string;
+  transactionHash: string;
+  logIndex: string;
 };
 
-async function fetchJson<T>(url: string): Promise<T> {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function rpcOnce<T>(method: string, params: unknown[]): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(url, {
-      headers: {
-        accept: "application/json",
-        "user-agent": "nft-sales-bot/1.0 (+https://stonkbrokers.cash)",
-      },
+    const response = await fetch(RPC_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
       signal: controller.signal,
     });
-    if (!response.ok) {
-      throw new Error(`Blockscout ${response.status}: ${await response.text()}`);
-    }
-    return (await response.json()) as T;
+    if (!response.ok) throw new Error(`rpc ${method} http ${response.status}`);
+    const payload = (await response.json()) as { result?: T; error?: { message?: string } };
+    if (payload.error) throw new Error(`rpc ${method}: ${payload.error.message ?? "error"}`);
+    if (payload.result === undefined) throw new Error(`rpc ${method}: empty result`);
+    return payload.result;
   } finally {
     clearTimeout(timer);
   }
 }
 
-function methodName(raw: string | undefined): string {
-  if (!raw) return "";
-  return raw.split("(")[0]!.trim();
+/**
+ * Retry with exponential backoff. The public node returns 429 under bursts, and
+ * a transient blip must never look like "no sales" — every caller here treats a
+ * final throw as "leave the cursor alone and try again next cycle".
+ */
+async function rpc<T>(method: string, params: unknown[]): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= RPC_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await rpcOnce<T>(method, params);
+    } catch (error) {
+      lastError = error;
+      if (attempt < RPC_MAX_ATTEMPTS) await sleep(500 * 2 ** (attempt - 1));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-type DecodedParam = {
-  name?: string;
-  value?: unknown;
-};
-
-type TxLogItem = {
-  address?: { hash?: string };
-  decoded?: {
-    method_call?: string;
-    parameters?: DecodedParam[];
-  };
-};
-
-type TxLogsResponse = {
-  items?: TxLogItem[];
-};
-
-type TxDetailResponse = {
-  value?: string;
-};
-
-/** Native ETH wei → ETH number, or null if missing/zero. */
-function weiToEth(weiRaw: string | undefined | null): number | null {
-  if (!weiRaw) return null;
-  try {
-    const wei = BigInt(weiRaw);
-    if (wei <= 0n) return null;
-    return Number(wei) / 1e18;
-  } catch {
-    return null;
+/** Sequential on purpose — parallel chunks are what trips the node's rate limit. */
+async function getLogsChunked(
+  address: string,
+  topics: (string | null)[],
+  fromBlock: number,
+  toBlock: number,
+): Promise<RpcLog[]> {
+  const logs: RpcLog[] = [];
+  for (let start = fromBlock; start <= toBlock; start += LOG_CHUNK_BLOCKS) {
+    const end = Math.min(start + LOG_CHUNK_BLOCKS - 1, toBlock);
+    const page = await rpc<RpcLog[]>("eth_getLogs", [
+      { address, topics, fromBlock: `0x${start.toString(16)}`, toBlock: `0x${end.toString(16)}` },
+    ]);
+    logs.push(...page);
   }
+  return logs;
+}
+
+function topicToAddress(topic: string | undefined): `0x${string}` | null {
+  if (!topic || topic.length !== 66) return null;
+  const address = `0x${topic.slice(26)}`.toLowerCase();
+  return /^0x[a-f0-9]{40}$/.test(address) ? (address as `0x${string}`) : null;
+}
+
+type SeaportItem = {
+  itemType: number;
+  token: string;
+  identifier: bigint;
+  amount: bigint;
+};
+
+/**
+ * Decode the non-indexed body of an OrderFulfilled log.
+ *
+ * Layout: [orderHash, recipient, offsetof(offer), offsetof(consideration)],
+ * then each array as [length, ...elements]. SpentItem is 4 static words;
+ * ReceivedItem is 5 (it carries a trailing recipient). Both element types are
+ * static, so the arrays are flat and need no per-element offset chasing.
+ */
+function decodeOrderFulfilled(data: string): { offer: SeaportItem[]; consideration: SeaportItem[] } | null {
+  const body = data.startsWith("0x") ? data.slice(2) : data;
+  if (body.length % 64 !== 0) return null;
+  const words: string[] = [];
+  for (let i = 0; i < body.length; i += 64) words.push(body.slice(i, i + 64));
+  if (words.length < 4) return null;
+
+  const readItems = (headerWord: number, wordsPerItem: number): SeaportItem[] | null => {
+    const offset = Number(BigInt(`0x${words[headerWord]!}`)) / 32;
+    if (!Number.isInteger(offset) || offset < 0 || offset >= words.length) return null;
+    const length = Number(BigInt(`0x${words[offset]!}`));
+    if (!Number.isFinite(length) || length < 0) return null;
+    const base = offset + 1;
+    if (base + length * wordsPerItem > words.length) return null;
+
+    const items: SeaportItem[] = [];
+    for (let i = 0; i < length; i += 1) {
+      const at = base + i * wordsPerItem;
+      items.push({
+        itemType: Number(BigInt(`0x${words[at]!}`)),
+        token: `0x${words[at + 1]!.slice(24)}`.toLowerCase(),
+        identifier: BigInt(`0x${words[at + 2]!}`),
+        amount: BigInt(`0x${words[at + 3]!}`),
+      });
+    }
+    return items;
+  };
+
+  const offer = readItems(2, 4);
+  const consideration = readItems(3, 5);
+  if (!offer || !consideration) return null;
+  return { offer, consideration };
 }
 
 /**
- * Sum payment considerations from Seaport OrderFulfilled logs.
+ * Total ETH paid for `tokenId`, summed across every OrderFulfilled log in the
+ * transaction that references it.
  *
- * itemType 0 = native ETH, 1 = ERC20 (WETH). NFT items (2/3) are ignored.
- * Prefer this over summing ERC-20 Transfer events — router hops (buyer→router
- * →Seaport) double-count the same WETH and inflate the tweeted price 2×.
+ * itemType 0 = native ETH, 1 = ERC-20 (WETH); 2/3 are the NFT legs. A direct
+ * listing produces one log whose offer holds the NFT and whose consideration
+ * holds seller proceeds plus fees. An accepted collection bid produces two:
+ * the bidder's order (NFT in consideration, WETH fees) and the seller's order
+ * (NFT in offer, WETH remainder). Summing both matched logs reconstructs the
+ * full price. Never sum raw WETH Transfer events instead — router hops
+ * (buyer→router→Seaport) emit the same amount twice and double the price.
  */
-function priceFromOrderFulfilled(logs: TxLogItem[], tokenId: string): number | null {
+function priceEthFromOrderFulfilled(logs: RpcLog[], tokenId: bigint): number | null {
   let totalWei = 0n;
-  let matchedOffer = false;
+  let matched = false;
 
-  for (const item of logs) {
-    if (item.address?.hash?.toLowerCase() !== SEAPORT_ADDRESS) continue;
-    const method = item.decoded?.method_call ?? "";
-    if (!method.startsWith("OrderFulfilled")) continue;
+  for (const log of logs) {
+    const decoded = decodeOrderFulfilled(log.data);
+    if (!decoded) continue;
 
-    const params = item.decoded?.parameters ?? [];
-    const offer = params.find((p) => p.name === "offer")?.value;
-    const consideration = params.find((p) => p.name === "consideration")?.value;
-    if (!Array.isArray(consideration)) continue;
+    const referencesToken = (items: SeaportItem[]): boolean =>
+      items.some((item) => (item.itemType === 2 || item.itemType === 3) && item.identifier === tokenId);
+    if (!referencesToken(decoded.offer) && !referencesToken(decoded.consideration)) continue;
+    matched = true;
 
-    // Only count fills that include this NFT in the offer (or, for some
-    // match* flows, in consideration). Prevents multi-NFT txs mixing prices.
-    const offersNft =
-      Array.isArray(offer) &&
-      offer.some(
-        (row) =>
-          Array.isArray(row) &&
-          String(row[0]) === "2" &&
-          String(row[2]) === tokenId,
-      );
-    const considersNft = consideration.some(
-      (row) =>
-        Array.isArray(row) &&
-        String(row[0]) === "2" &&
-        String(row[2]) === tokenId,
-    );
-    if (!offersNft && !considersNft) continue;
-    matchedOffer = true;
-
-    for (const row of consideration) {
-      if (!Array.isArray(row) || row.length < 4) continue;
-      const itemType = String(row[0]);
-      // 0 = ETH, 1 = ERC20. Skip NFTs / criteria.
-      if (itemType !== "0" && itemType !== "1") continue;
-      try {
-        const amount = BigInt(String(row[3]));
-        if (amount > 0n) totalWei += amount;
-      } catch {
-        // ignore malformed
-      }
+    for (const item of decoded.consideration) {
+      if (item.itemType !== 0 && item.itemType !== 1) continue;
+      if (item.amount > 0n) totalWei += item.amount;
     }
   }
 
-  if (!matchedOffer || totalWei <= 0n) return null;
+  if (!matched || totalWei <= 0n) return null;
   return Number(totalWei) / 1e18;
 }
 
-/**
- * Poll Robinhood Blockscout for Seaport (OpenSea) NFT purchase transfers.
- *
- * Always re-scans a full lookback window (DB dedupe prevents double posts).
- * Paginates — StonkBrokers has heavy AMM sell/transfer volume, so a single
- * page of 50 often contains zero Seaport fills even when OpenSea sales exist.
- */
 export class SeaportRobinhoodProvider {
-  /**
-   * txHash → "did the receipt touch Seaport?". The lookback window is
-   * re-scanned every poll cycle, so without this cache every router tx in the
-   * window would trigger a Blockscout logs fetch every few seconds.
-   */
-  private readonly seaportTouchCache = new Map<string, boolean>();
+  /** Highest block already scanned. null until the first successful cycle. */
+  private cursorBlock: number | null = null;
 
-  /** Cache key `${txHash}:${tokenId}` → ETH sale price. */
-  private readonly priceEthCache = new Map<string, number | null>();
+  /** blockNumber → unix seconds. Only sale blocks are ever looked up. */
+  private readonly blockTimeCache = new Map<number, number>();
 
   public constructor(private readonly config: { lookbackSeconds: number }) {}
 
-  /** True when the tx receipt contains any log emitted by the Seaport contract. */
-  private async txTouchesSeaport(txHash: string): Promise<boolean> {
-    const cached = this.seaportTouchCache.get(txHash);
-    if (cached !== undefined) return cached;
-
-    let touches = false;
+  private async blockTimestamp(blockNumber: number): Promise<Date | null> {
+    const cached = this.blockTimeCache.get(blockNumber);
+    if (cached !== undefined) return new Date(cached * 1000);
     try {
-      const logs = await fetchJson<TxLogsResponse>(
-        `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}/logs`,
-      );
-      touches = (logs.items ?? []).some(
-        (item) => item.address?.hash?.toLowerCase() === SEAPORT_ADDRESS,
-      );
-      if (touches) {
-        console.log(`[seaport-rh] router fill detected tx=${txHash.slice(0, 12)}…`);
-      }
-    } catch (error) {
-      // Don't cache on fetch failure — retry next cycle.
-      console.warn(`[seaport-rh] logs fetch failed for ${txHash.slice(0, 12)}… — ${(error as Error).message}`);
-      return false;
-    }
-
-    // Bounded cache: entries only matter within the lookback window.
-    if (this.seaportTouchCache.size > 5_000) this.seaportTouchCache.clear();
-    this.seaportTouchCache.set(txHash, touches);
-    return touches;
-  }
-
-  /**
-   * Resolve the ETH sale price for a Seaport fill:
-   *   1. Sum OrderFulfilled payment considerations (ETH/WETH) for this token
-   *   2. Fallback: native tx value (simple ETH buys)
-   *
-   * Never sum raw WETH Transfer events — router wraps (buyer→router→Seaport)
-   * emit the same amount twice and inflate the price 2×.
-   */
-  private async resolvePriceEth(txHash: string, tokenId: string): Promise<number | null> {
-    const cacheKey = `${txHash}:${tokenId}`;
-    if (this.priceEthCache.has(cacheKey)) return this.priceEthCache.get(cacheKey) ?? null;
-
-    let price: number | null = null;
-    try {
-      const logs = await fetchJson<TxLogsResponse>(
-        `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}/logs`,
-      );
-      price = priceFromOrderFulfilled(logs.items ?? [], tokenId);
-
-      if (price === null) {
-        const tx = await fetchJson<TxDetailResponse>(
-          `${BLOCKSCOUT_BASE}/api/v2/transactions/${txHash}`,
-        );
-        price = weiToEth(tx.value);
-      }
-    } catch (error) {
-      console.warn(
-        `[seaport-rh] price fetch failed for ${txHash.slice(0, 12)}… — ${(error as Error).message}`,
-      );
+      const block = await rpc<{ timestamp?: string }>("eth_getBlockByNumber", [
+        `0x${blockNumber.toString(16)}`,
+        false,
+      ]);
+      if (!block?.timestamp) return null;
+      const seconds = Number(BigInt(block.timestamp));
+      if (this.blockTimeCache.size > 5_000) this.blockTimeCache.clear();
+      this.blockTimeCache.set(blockNumber, seconds);
+      return new Date(seconds * 1000);
+    } catch {
       return null;
     }
-
-    if (this.priceEthCache.size > 5_000) this.priceEthCache.clear();
-    this.priceEthCache.set(cacheKey, price);
-    return price;
   }
 
   public async fetchLatestSales(collections: TrackedCollection[]): Promise<CanonicalSaleEvent[]> {
@@ -264,95 +248,117 @@ export class SeaportRobinhoodProvider {
       return [];
     }
 
+    const lookbackBlocks = Math.ceil(this.config.lookbackSeconds * BLOCKS_PER_SECOND);
     const events: CanonicalSaleEvent[] = [];
-    const nowSec = Math.floor(Date.now() / 1000);
-    const after = nowSec - this.config.lookbackSeconds;
+
+    // A throw anywhere below leaves cursorBlock untouched, so the next cycle
+    // re-scans the same range rather than skipping over unscanned history.
+    const head = Number(BigInt(await rpc<string>("eth_blockNumber", [])));
+    const oldestAllowed = Math.max(0, head - lookbackBlocks);
+    const fromBlock =
+      this.cursorBlock === null
+        ? oldestAllowed
+        : Math.max(oldestAllowed, this.cursorBlock + 1 - CURSOR_OVERLAP_BLOCKS);
+    const toBlock = Math.min(head, fromBlock + MAX_BLOCKS_PER_CYCLE - 1);
+    if (toBlock < fromBlock) return [];
 
     for (const collection of targets) {
-      let matched = 0;
-      let scanned = 0;
-      let reachedLookback = false;
-
-      try {
-        for (let page = 1; page <= MAX_PAGES; page += 1) {
-          const url =
-            `${BLOCKSCOUT_BASE}/api?module=account&action=tokennfttx` +
-            `&contractaddress=${collection.contract}` +
-            `&page=${page}&offset=${PAGE_SIZE}&sort=desc`;
-
-          const payload = await fetchJson<{ status?: string; result?: TokenNftTx[] | string }>(url);
-          const rows = Array.isArray(payload.result) ? payload.result : [];
-          if (rows.length === 0) {
-            reachedLookback = true;
-            break;
-          }
-
-          for (const row of rows) {
-            const ts = Number(row.timeStamp ?? 0);
-            if (!Number.isFinite(ts)) continue;
-            if (ts <= after) {
-              reachedLookback = true;
-              break;
-            }
-            scanned += 1;
-
-            const txHash = row.hash?.toLowerCase();
-            const tokenId = row.tokenID;
-            if (!txHash || !/^0x[a-f0-9]{64}$/.test(txHash) || !tokenId) continue;
-
-            // Direct Seaport call → match. Known AMM/transfer method → skip.
-            // Anything else (router multicalls, aggregators) → check the
-            // receipt for a Seaport-emitted log before deciding.
-            const fn = methodName(row.functionName);
-            if (!SEAPORT_METHODS.has(fn)) {
-              if (KNOWN_NON_SEAPORT_METHODS.has(fn)) continue;
-              if (!(await this.txTouchesSeaport(txHash))) continue;
-            }
-
-            const buyer = row.to?.toLowerCase();
-            const seller = row.from?.toLowerCase();
-            const priceEth = await this.resolvePriceEth(txHash, String(tokenId));
-            matched += 1;
-
-            events.push({
-              chainId: collection.chainId,
-              contract: collection.contract,
-              collectionSlug: collection.slug,
-              tokenId: String(tokenId),
-              txHash: txHash as `0x${string}`,
-              logIndex: 0,
-              blockNumber: BigInt(row.blockNumber ?? 0),
-              timestamp: new Date(ts * 1000),
-              marketplace: "opensea",
-              buyer: buyer && /^0x[a-f0-9]{40}$/.test(buyer) ? (buyer as `0x${string}`) : null,
-              seller: seller && /^0x[a-f0-9]{40}$/.test(seller) ? (seller as `0x${string}`) : null,
-              priceEth,
-              priceUsd: null,
-              paymentSymbol: "ETH",
-              assetUrl: `https://opensea.io/assets/robinhood/${collection.contract}/${tokenId}`,
-              imageUrl: null,
-              txUrl: `https://robinhoodchain.blockscout.com/tx/${txHash}`,
-              floorChangePct: null,
-              eventId: `${txHash}:seaport-rh:${tokenId}`,
-              payload: row,
-            });
-          }
-
-          if (reachedLookback) break;
-          if (rows.length < PAGE_SIZE) {
-            reachedLookback = true;
-            break;
-          }
-        }
-
-        console.log(
-          `[seaport-rh] ${collection.slug}: lookback=${this.config.lookbackSeconds}s scanned=${scanned} matched=${matched} complete=${reachedLookback}`,
-        );
-      } catch (error) {
-        console.warn(`[seaport-rh] ${collection.slug} failed — ${(error as Error).message}`);
+      const transferLogs = await getLogsChunked(
+        collection.contract,
+        [TRANSFER_TOPIC],
+        fromBlock,
+        toBlock,
+      );
+      // Nothing moved, so there is nothing to price — skip the Seaport query.
+      if (transferLogs.length === 0) {
+        console.log(`[seaport-rh] ${collection.slug}: blocks=${fromBlock}..${toBlock} transfers=0 matched=0`);
+        continue;
       }
+      const seaportLogs = await getLogsChunked(
+        SEAPORT_ADDRESS,
+        [ORDER_FULFILLED_TOPIC],
+        fromBlock,
+        toBlock,
+      );
+
+      const seaportByTx = new Map<string, RpcLog[]>();
+      for (const log of seaportLogs) {
+        const tx = log.transactionHash.toLowerCase();
+        const bucket = seaportByTx.get(tx);
+        if (bucket) bucket.push(log);
+        else seaportByTx.set(tx, [log]);
+      }
+
+      // Collapse a token's transfers within one tx. Conduit/router hops relay
+      // the NFT seller→conduit→buyer, so the true counterparties are the first
+      // sender and the final recipient.
+      type Leg = { tokenId: bigint; seller: `0x${string}` | null; buyer: `0x${string}` | null; block: number };
+      const legsByTx = new Map<string, Map<string, Leg>>();
+
+      for (const log of transferLogs) {
+        // ERC-721 Transfer carries an indexed tokenId; ERC-20 Transfer has 3 topics.
+        if (log.topics.length !== 4) continue;
+        const tx = log.transactionHash.toLowerCase();
+        if (!seaportByTx.has(tx)) continue;
+
+        const tokenId = BigInt(log.topics[3]!);
+        const key = tokenId.toString();
+        const byToken = legsByTx.get(tx) ?? new Map<string, Leg>();
+        const existing = byToken.get(key);
+        if (existing) {
+          existing.buyer = topicToAddress(log.topics[2]);
+        } else {
+          byToken.set(key, {
+            tokenId,
+            seller: topicToAddress(log.topics[1]),
+            buyer: topicToAddress(log.topics[2]),
+            block: Number(BigInt(log.blockNumber)),
+          });
+        }
+        legsByTx.set(tx, byToken);
+      }
+
+      let matched = 0;
+      for (const [tx, byToken] of legsByTx) {
+        const orderLogs = seaportByTx.get(tx) ?? [];
+        for (const leg of byToken.values()) {
+          const priceEth = priceEthFromOrderFulfilled(orderLogs, leg.tokenId);
+          const timestamp = await this.blockTimestamp(leg.block);
+          matched += 1;
+
+          events.push({
+            chainId: collection.chainId,
+            contract: collection.contract,
+            collectionSlug: collection.slug,
+            tokenId: leg.tokenId.toString(),
+            txHash: tx as `0x${string}`,
+            logIndex: 0,
+            blockNumber: BigInt(leg.block),
+            timestamp,
+            marketplace: "opensea",
+            buyer: leg.buyer,
+            seller: leg.seller,
+            priceEth,
+            priceUsd: null,
+            paymentSymbol: "ETH",
+            assetUrl: `https://opensea.io/assets/robinhood/${collection.contract}/${leg.tokenId}`,
+            imageUrl: null,
+            txUrl: `https://robinhoodchain.blockscout.com/tx/${tx}`,
+            floorChangePct: null,
+            // Unchanged from the Blockscout implementation so previously
+            // posted sales stay deduped across this migration.
+            eventId: `${tx}:seaport-rh:${leg.tokenId}`,
+            payload: { tx, tokenId: leg.tokenId.toString(), block: leg.block },
+          });
+        }
+      }
+
+      console.log(
+        `[seaport-rh] ${collection.slug}: blocks=${fromBlock}..${toBlock} transfers=${transferLogs.length} seaportTx=${seaportByTx.size} matched=${matched}`,
+      );
     }
 
+    this.cursorBlock = toBlock;
     return events;
   }
 }
