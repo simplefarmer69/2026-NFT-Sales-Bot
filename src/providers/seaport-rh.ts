@@ -175,19 +175,34 @@ function decodeOrderFulfilled(data: string): { offer: SeaportItem[]; considerati
 }
 
 /**
- * Total ETH paid for `tokenId`, summed across every OrderFulfilled log in the
- * transaction that references it.
+ * Total ETH paid for `tokenId`, derived from the OrderFulfilled logs in the
+ * transaction that reference it.
  *
- * itemType 0 = native ETH, 1 = ERC-20 (WETH); 2/3 are the NFT legs. A direct
- * listing produces one log whose offer holds the NFT and whose consideration
- * holds seller proceeds plus fees. An accepted collection bid produces two:
- * the bidder's order (NFT in consideration, WETH fees) and the seller's order
- * (NFT in offer, WETH remainder). Summing both matched logs reconstructs the
- * full price. Never sum raw WETH Transfer events instead — router hops
- * (buyer→router→Seaport) emit the same amount twice and double the price.
+ * itemType 0 = native ETH, 1 = ERC-20 (WETH); 2/3 are the NFT legs. Three
+ * fill shapes exist on OpenSea's Seaport 1.6, and in every one of them the
+ * FULL price appears in at least one matched log — as either that log's
+ * payment-item offer sum or its payment-item consideration sum:
+ *
+ *   1. Direct listing (one log): NFT in offer, consideration = seller
+ *      proceeds + fees → consideration sum is the price.
+ *   2. Accepted WETH bid, current single-log shape (seen 2026-08-02): the
+ *      bidder's order only — offer = full WETH price, consideration = NFT +
+ *      marketplace/royalty fees. The seller's proceeds never appear in any
+ *      consideration, so the OFFER sum is the price. (Summing considerations
+ *      here yields just the ~3.8% fee slice — the "0.35 ETH sale" bug.)
+ *   3. Accepted WETH bid, legacy two-log matchOrders shape: bidder's log as
+ *      in (2) plus a seller log whose consideration is the post-fee
+ *      remainder. The bidder log's offer sum is the price.
+ *
+ * So: per matched log take max(offer payments, consideration payments), then
+ * take the max across logs — summing across logs would double-count shape (3)
+ * (full price in one log + remainder in the other). A token sells at most
+ * once per tx, so max never mixes two sales. Never sum raw WETH Transfer
+ * events either — router hops (buyer→router→Seaport) emit the same amount
+ * twice and double the price.
  */
 function priceEthFromOrderFulfilled(logs: RpcLog[], tokenId: bigint): number | null {
-  let totalWei = 0n;
+  let bestWei = 0n;
   let matched = false;
 
   for (const log of logs) {
@@ -199,14 +214,21 @@ function priceEthFromOrderFulfilled(logs: RpcLog[], tokenId: bigint): number | n
     if (!referencesToken(decoded.offer) && !referencesToken(decoded.consideration)) continue;
     matched = true;
 
-    for (const item of decoded.consideration) {
-      if (item.itemType !== 0 && item.itemType !== 1) continue;
-      if (item.amount > 0n) totalWei += item.amount;
-    }
+    const paymentSum = (items: SeaportItem[]): bigint =>
+      items.reduce(
+        (sum, item) => (item.itemType === 0 || item.itemType === 1 ? sum + item.amount : sum),
+        0n,
+      );
+    const logWei = (() => {
+      const offerWei = paymentSum(decoded.offer);
+      const considerationWei = paymentSum(decoded.consideration);
+      return offerWei > considerationWei ? offerWei : considerationWei;
+    })();
+    if (logWei > bestWei) bestWei = logWei;
   }
 
-  if (!matched || totalWei <= 0n) return null;
-  return Number(totalWei) / 1e18;
+  if (!matched || bestWei <= 0n) return null;
+  return Number(bestWei) / 1e18;
 }
 
 export class SeaportRobinhoodProvider {
