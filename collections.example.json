@@ -1,16 +1,5 @@
 [
   {
-    "slug": "pixel-pups",
-    "openseaSlug": "pixel-pups",
-    "contract": "0x1c75df005dd674630b212ce8106fcab29b1ac1bf",
-    "chainId": 1,
-    "displayName": "Pixel Pup",
-    "emoji": "📈",
-    "communityCallToAction": "The pack is growing",
-    "communityUrl": "https://opensea.io/collection/pixel-pups",
-    "minPriceEth": null
-  },
-  {
     "slug": "pup-cup",
     "openseaSlug": "the-pup-cup-429884582",
     "contract": "0x48bc32c1fd1f3c4f5d1be11c0b586b63b44da751",
@@ -20,7 +9,10 @@
     "communityCallToAction": "Join the World Pup Protocol",
     "communityUrl": "https://opensea.io/collection/the-pup-cup-429884582",
     "minPriceEth": null,
-    "hashtags": ["#PupCup", "#WorldPupProtocol"]
+    "hashtags": [
+      "#PupCup",
+      "#WorldPupProtocol"
+    ]
   },
   {
     "slug": "stonkbroker",
@@ -31,6 +23,17 @@
     "emoji": "-",
     "communityCallToAction": "CLOCK IN",
     "communityUrl": "https://www.stonkbrokers.cash/marketplace",
+    "minPriceEth": null
+  },
+  {
+    "slug": "stonk-interns",
+    "openseaSlug": "interns",
+    "contract": "0xFc4b0c4F464dC3037cF013934648a8A726d565A5",
+    "chainId": 4663,
+    "displayName": "Stonk Intern",
+    "emoji": "-",
+    "communityCallToAction": "CLOCK IN",
+    "communityUrl": "https://www.stonkbrokers.cash/marketplace?tab=interns",
     "minPriceEth": null
   }
 ]

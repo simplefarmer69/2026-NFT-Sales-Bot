@@ -35,14 +35,22 @@ function formatEth(value: number | null): string {
   return value.toFixed(4);
 }
 
-function isStonkBroker(collection: TrackedCollection): boolean {
-  return collection.slug === "stonkbroker" || collection.openseaSlug === "stonkbrokers-434284142";
+/**
+ * Robinhood Chain collections (StonkBrokers, Stonk Interns) all use the
+ * no-emoji ticker layout below.
+ */
+function isRobinhoodCollection(collection: TrackedCollection): boolean {
+  return (
+    collection.chainId === 4663 ||
+    collection.slug === "stonkbroker" ||
+    collection.openseaSlug === "stonkbrokers-434284142"
+  );
 }
 
 /**
- * StonkBroker sales: no emojis, no hashtags. Tickers close the post.
+ * StonkBroker / Stonk Intern sales: no emojis, no hashtags. Tickers close the post.
  *
- *   StonkBroker #4347 SOLD
+ *   StonkBroker #4347 SOLD          (or: Stonk Intern #384 SOLD)
  *   0.050 ETH
  *   OpenSea on Robinhood Chain
  *   0x1234…abcd → 0x5678…ef01
@@ -53,7 +61,7 @@ function isStonkBroker(collection: TrackedCollection): boolean {
  * Price is ETH only (never USD); the line is omitted if unresolved.
  * Only ONE cashtag allowed — X 403s posts with multiple $SYMBOLs.
  */
-function renderStonkBrokerAlert(input: {
+function renderRobinhoodAlert(input: {
   event: CanonicalSaleEvent;
   collection: TrackedCollection;
 }): string {
@@ -108,7 +116,7 @@ function renderStonkBrokerAlert(input: {
 /**
  * Render the X post body for a sale.
  *
- * StonkBroker posts use a dedicated no-emoji / ticker footer layout.
+ * Robinhood Chain posts (StonkBrokers, Stonk Interns) use a dedicated no-emoji / ticker footer layout.
  * Other collections keep the stock-desk emoji template.
  */
 export function renderSaleAlert(input: {
@@ -116,8 +124,8 @@ export function renderSaleAlert(input: {
   collection: TrackedCollection;
   showFloorLine: boolean;
 }): string {
-  if (isStonkBroker(input.collection)) {
-    return renderStonkBrokerAlert(input);
+  if (isRobinhoodCollection(input.collection)) {
+    return renderRobinhoodAlert(input);
   }
 
   const { event, collection, showFloorLine } = input;

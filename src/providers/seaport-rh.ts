@@ -1,13 +1,15 @@
 import type { CanonicalSaleEvent, TrackedCollection } from "../types.js";
 
 /**
- * OpenSea (Seaport) fill watcher for StonkBrokers on Robinhood Chain.
+ * OpenSea (Seaport) fill watcher for the Robinhood Chain collections
+ * (StonkBrokers + Stonk Interns — every tracked collection on chain 4663).
  *
- * Reads the chain directly over JSON-RPC. Two `eth_getLogs` calls per cycle —
- * the collection's ERC-721 Transfers and Seaport's OrderFulfilled events over
- * the same block range — are correlated by transaction hash. A collection
- * transfer whose tx also emitted OrderFulfilled is an OpenSea sale; everything
- * else (Anvil AMM trades, plain transfers, mints) is ignored.
+ * Reads the chain directly over JSON-RPC. One `eth_getLogs` per collection for
+ * its ERC-721 Transfers plus ONE shared call for Seaport's OrderFulfilled
+ * events over the same block range — correlated by transaction hash. A
+ * collection transfer whose tx also emitted OrderFulfilled is an OpenSea sale;
+ * everything else (Anvil AMM trades, plain transfers, mints, the interns'
+ * dormant sweeps into broker wallets) is ignored.
  *
  * This replaced a Blockscout REST scan that re-paged up to 1,500 NFT-transfer
  * rows every 4s poll and then fetched per-tx logs for pricing. That volume
@@ -19,6 +21,9 @@ import type { CanonicalSaleEvent, TrackedCollection } from "../types.js";
  */
 
 const RPC_URL = process.env.ROBINHOOD_RPC_URL ?? "https://rpc.mainnet.chain.robinhood.com";
+
+/** Robinhood Chain id — every tracked collection on it is watched here. */
+const ROBINHOOD_CHAIN_ID = 4663;
 
 /** Seaport 1.6 on Robinhood Chain — emits OrderFulfilled on every OpenSea fill. */
 const SEAPORT_ADDRESS = "0x0000000000000068f116a894984e2db1123eb395";
@@ -259,14 +264,9 @@ export class SeaportRobinhoodProvider {
   }
 
   public async fetchLatestSales(collections: TrackedCollection[]): Promise<CanonicalSaleEvent[]> {
-    const targets = collections.filter(
-      (c) =>
-        c.slug === "stonkbroker" ||
-        c.openseaSlug === "stonkbrokers-434284142" ||
-        (c.chainId === 4663 && c.openseaSlug.toLowerCase().includes("stonk")),
-    );
+    const targets = collections.filter((c) => c.chainId === ROBINHOOD_CHAIN_ID);
     if (targets.length === 0) {
-      console.warn("[seaport-rh] no Robinhood StonkBrokers collection in tracking list");
+      console.warn("[seaport-rh] no Robinhood Chain collection in tracking list");
       return [];
     }
 
@@ -284,6 +284,28 @@ export class SeaportRobinhoodProvider {
     const toBlock = Math.min(head, fromBlock + MAX_BLOCKS_PER_CYCLE - 1);
     if (toBlock < fromBlock) return [];
 
+    // Seaport logs cover every collection in the range, so fetch them once per
+    // cycle — lazily, only if some tracked collection actually moved.
+    let seaportByTx: Map<string, RpcLog[]> | null = null;
+    const loadSeaportByTx = async (): Promise<Map<string, RpcLog[]>> => {
+      if (seaportByTx) return seaportByTx;
+      const seaportLogs = await getLogsChunked(
+        SEAPORT_ADDRESS,
+        [ORDER_FULFILLED_TOPIC],
+        fromBlock,
+        toBlock,
+      );
+      const byTx = new Map<string, RpcLog[]>();
+      for (const log of seaportLogs) {
+        const tx = log.transactionHash.toLowerCase();
+        const bucket = byTx.get(tx);
+        if (bucket) bucket.push(log);
+        else byTx.set(tx, [log]);
+      }
+      seaportByTx = byTx;
+      return byTx;
+    };
+
     for (const collection of targets) {
       const transferLogs = await getLogsChunked(
         collection.contract,
@@ -296,20 +318,7 @@ export class SeaportRobinhoodProvider {
         console.log(`[seaport-rh] ${collection.slug}: blocks=${fromBlock}..${toBlock} transfers=0 matched=0`);
         continue;
       }
-      const seaportLogs = await getLogsChunked(
-        SEAPORT_ADDRESS,
-        [ORDER_FULFILLED_TOPIC],
-        fromBlock,
-        toBlock,
-      );
-
-      const seaportByTx = new Map<string, RpcLog[]>();
-      for (const log of seaportLogs) {
-        const tx = log.transactionHash.toLowerCase();
-        const bucket = seaportByTx.get(tx);
-        if (bucket) bucket.push(log);
-        else seaportByTx.set(tx, [log]);
-      }
+      const seaportByTxForRange = await loadSeaportByTx();
 
       // Collapse a token's transfers within one tx. Conduit/router hops relay
       // the NFT seller→conduit→buyer, so the true counterparties are the first
@@ -321,7 +330,7 @@ export class SeaportRobinhoodProvider {
         // ERC-721 Transfer carries an indexed tokenId; ERC-20 Transfer has 3 topics.
         if (log.topics.length !== 4) continue;
         const tx = log.transactionHash.toLowerCase();
-        if (!seaportByTx.has(tx)) continue;
+        if (!seaportByTxForRange.has(tx)) continue;
 
         const tokenId = BigInt(log.topics[3]!);
         const key = tokenId.toString();
@@ -342,7 +351,7 @@ export class SeaportRobinhoodProvider {
 
       let matched = 0;
       for (const [tx, byToken] of legsByTx) {
-        const orderLogs = seaportByTx.get(tx) ?? [];
+        const orderLogs = seaportByTxForRange.get(tx) ?? [];
         for (const leg of byToken.values()) {
           const priceEth = priceEthFromOrderFulfilled(orderLogs, leg.tokenId);
           const timestamp = await this.blockTimestamp(leg.block);
@@ -376,7 +385,7 @@ export class SeaportRobinhoodProvider {
       }
 
       console.log(
-        `[seaport-rh] ${collection.slug}: blocks=${fromBlock}..${toBlock} transfers=${transferLogs.length} seaportTx=${seaportByTx.size} matched=${matched}`,
+        `[seaport-rh] ${collection.slug}: blocks=${fromBlock}..${toBlock} transfers=${transferLogs.length} seaportTx=${seaportByTxForRange.size} matched=${matched}`,
       );
     }
 

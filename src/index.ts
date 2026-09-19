@@ -1,5 +1,5 @@
 import { loadCollections } from "./config/collections.js";
-import { ensureStonkBrokerTracked } from "./config/default-collections.js";
+import { ROBINHOOD_COLLECTIONS, ensureRobinhoodCollectionsTracked } from "./config/default-collections.js";
 import { loadEnv } from "./config/env.js";
 import { AlertBotDb } from "./db.js";
 import { runMigrations } from "./db/migrate.js";
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
     await runMigrations(env.databaseUrl);
   }
 
-  const collections: TrackedCollection[] = ensureStonkBrokerTracked(
+  const collections: TrackedCollection[] = ensureRobinhoodCollectionsTracked(
     loadCollections({
       path: env.collectionsPath,
       json: env.collectionsJson,
@@ -80,15 +80,17 @@ async function main(): Promise<void> {
   console.log(
     `[boot] tracking ${collections.length} collection(s): ${collections.map((c) => c.slug).join(", ")}`,
   );
-  const stonk = collections.find(
-    (c) => c.slug === "stonkbroker" || c.openseaSlug === "stonkbrokers-434284142",
-  );
-  if (stonk) {
-    console.log(
-      `[boot] stonkbroker chainId=${stonk.chainId} opensea=${stonk.openseaSlug} contract=${stonk.contract} cta="${stonk.communityCallToAction}"`,
-    );
-  } else {
-    console.error("[boot] FATAL: stonkbroker missing from tracking list after ensureStonkBrokerTracked");
+  for (const canonical of ROBINHOOD_COLLECTIONS) {
+    const tracked = collections.find((c) => c.slug === canonical.slug);
+    if (tracked) {
+      console.log(
+        `[boot] ${tracked.slug} chainId=${tracked.chainId} opensea=${tracked.openseaSlug} contract=${tracked.contract} cta="${tracked.communityCallToAction}"`,
+      );
+    } else {
+      console.error(
+        `[boot] FATAL: ${canonical.slug} missing from tracking list after ensureRobinhoodCollectionsTracked`,
+      );
+    }
   }
 
   const db = new AlertBotDb(env.databaseUrl);
@@ -126,7 +128,7 @@ async function main(): Promise<void> {
   const x = new XClient(env.xCredentials);
   console.log("[boot] X client ready (OAuth 1.0a)");
   console.log(
-    `[boot] sources: OpenSea API (lookback=${env.openSeaPollLookbackSec}s) + Robinhood Seaport (lookback=${env.seaportRhLookbackSec}s); Anvil AMM off`,
+    `[boot] sources: OpenSea API (lookback=${env.openSeaPollLookbackSec}s) + Robinhood Seaport (lookback=${env.seaportRhLookbackSec}s); Anvil AMM off; maxPostAge=${env.maxPostAgeSec || "off"}`,
   );
 
   let lastFloorPruneAt = 0;
@@ -196,6 +198,7 @@ async function main(): Promise<void> {
       // 3. Claim → post → mark posted. Never treat a failed tweet as "done".
       let posted = 0;
       let skippedDedupe = 0;
+      let skippedStale = 0;
       for (const event of ordered) {
         const collection = collections.find((c) => c.slug === event.collectionSlug);
         if (!collection) continue;
@@ -220,6 +223,22 @@ async function main(): Promise<void> {
           skippedDedupe += 1;
           console.log(
             `[loop] dedupe_skip slug=${event.collectionSlug} token=${event.tokenId} tx=${event.txHash.slice(0, 12)}…`,
+          );
+          continue;
+        }
+
+        // Cutover guard (MAX_POST_AGE_SEC): a sale older than the window is
+        // history, not news — record it as posted so it never tweets, and
+        // never replays after the guard is removed.
+        if (
+          env.maxPostAgeSec > 0 &&
+          event.timestamp !== null &&
+          Date.now() - event.timestamp.getTime() > env.maxPostAgeSec * 1000
+        ) {
+          await db.markSalePosted(event);
+          skippedStale += 1;
+          console.log(
+            `[loop] stale_skip slug=${event.collectionSlug} token=${event.tokenId} age=${Math.round((Date.now() - event.timestamp.getTime()) / 60_000)}m tx=${event.txHash.slice(0, 12)}…`,
           );
           continue;
         }
@@ -261,7 +280,7 @@ async function main(): Promise<void> {
         }
       }
       if (ordered.length > 0) {
-        console.log(`[loop] posted=${posted} dedupe_skip=${skippedDedupe}`);
+        console.log(`[loop] posted=${posted} dedupe_skip=${skippedDedupe} stale_skip=${skippedStale}`);
       }
     } catch (error) {
       console.error(`[loop] cycle error — ${(error as Error).message}`);

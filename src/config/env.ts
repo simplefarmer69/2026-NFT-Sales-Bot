@@ -15,6 +15,8 @@ export type AppEnv = {
   pollMs: number;
   runMigrations: boolean;
   floorDeltaLine: boolean;
+  /** Sales older than this many seconds are baselined (marked posted) without tweeting. 0 = off. */
+  maxPostAgeSec: number;
 };
 
 function requireString(name: string): string {
@@ -38,6 +40,16 @@ function parsePositiveNumber(name: string, defaultValue: number): number {
   if (!raw) return defaultValue;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid numeric env var ${name}=${raw}`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeNumber(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
     throw new Error(`Invalid numeric env var ${name}=${raw}`);
   }
   return parsed;
@@ -70,9 +82,9 @@ export function loadEnv(): AppEnv {
     databaseUrl: requireString("DATABASE_URL"),
     openSeaApiKey: requireString("OPENSEA_API_KEY"),
     openSeaBaseUrl: process.env.OPENSEA_BASE_URL ?? "https://api.opensea.io",
-    // OpenSea HTTP API lookback (Pixel Pups / Pup Cup).
+    // OpenSea HTTP API lookback (Pup Cup).
     openSeaPollLookbackSec: parsePositiveNumber("OPENSEA_POLL_LOOKBACK_SEC", 1800),
-    // Seaport-on-RH lookback — StonkBrokers OpenSea fills are sparse vs AMM
+    // Seaport-on-RH lookback — StonkBrokers / Stonk Interns OpenSea fills are sparse vs AMM
     // traffic. Railway often pins OPENSEA_POLL_LOOKBACK_SEC=900 (15m), which
     // drops marketplace sales that land outside that window. 4h default so a
     // redeploy also back-fills sales missed while the old window was live;
@@ -84,5 +96,10 @@ export function loadEnv(): AppEnv {
     pollMs: parsePositiveNumber("ALERT_POLL_MS", 4000),
     runMigrations: parseBool("RUN_MIGRATIONS", true),
     floorDeltaLine: parseBool("FLOOR_DELTA_LINE", true),
+    // Cutover guard: when a NEW collection joins the tracking list, the 4h
+    // Seaport lookback would replay its whole recent history as a tweet burst.
+    // Set this (e.g. 900) for the first deploy so older sales are baselined
+    // into the dedupe table silently, then remove it so outage backfills work.
+    maxPostAgeSec: parseNonNegativeNumber("MAX_POST_AGE_SEC", 0),
   };
 }
